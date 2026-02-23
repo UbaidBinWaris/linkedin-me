@@ -1,0 +1,5 @@
+node_modules/
+session/
+.env
+data/commented_posts.csv
+*.log

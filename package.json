@@ -1,0 +1,21 @@
+{
+  "name": "linkedin-comment-bot",
+  "version": "1.0.0",
+  "description": "LinkedIn comment bot using Playwright and Gemini AI",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "login": "node bot.js --login"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "chalk": "^4.1.2",
+    "csv-parser": "^3.0.0",
+    "csv-writer": "^1.6.0",
+    "dotenv": "^16.4.7",
+    "playwright": "^1.50.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
