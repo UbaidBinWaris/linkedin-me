@@ -1,20 +1,22 @@
 'use strict';
 
 /**
- * ─────────────────────────────────────────────────────────
+ * ─────────────────────────────────────────────────────────────────
  *  LinkedIn Comment Bot — Main Orchestrator
- *  Usage: node bot.js
- * ─────────────────────────────────────────────────────────
+ *  Run manually: node bot.js
  *
- * Flow:
- *  1. Load session (or login if no valid session)
- *  2. Read target profiles from data/target_profiles.csv
- *  3. Scrape recent posts from each profile
- *  4. Filter out already-commented posts (from data/commented_posts.csv)
- *  5. Generate a Gemini AI comment for each new post
- *  6. Post the comment on LinkedIn
- *  7. Record to CSV to avoid future duplicates
- *  8. Respect MAX_COMMENTS_PER_RUN limit
+ *  Flow:
+ *   1. Check how many comments were already posted TODAY
+ *      → If daily cap already hit → exit gracefully
+ *      → If cap has remaining slots → continue
+ *   2. Load saved browser session (or trigger login if no session)
+ *   3. Scrape home feed (primary) + target profiles (optional CSV)
+ *   4. Filter: already-commented posts + Open-to-Work authors
+ *   5. AI Interest scoring — skip boring/unworthy posts
+ *   6. Generate personalized comment via Gemini
+ *   7. Post on LinkedIn with human-like delays
+ *   8. Track in CSV (deduplication + daily count)
+ * ─────────────────────────────────────────────────────────────────
  */
 
 require('dotenv').config();
@@ -22,159 +24,214 @@ require('dotenv').config();
 const chalk = require('chalk');
 const config = require('./src/config');
 const { createSession, closeSession, randomDelay } = require('./src/browser/session');
-const { scrapeProfilePosts, scrapeFeedPosts } = require('./src/linkedin/feed');
+const { scrapeFeedPosts, scrapeProfilePosts } = require('./src/linkedin/feed');
 const { postComment } = require('./src/linkedin/commenter');
-const { generateComment } = require('./src/ai/gemini');
+const { generateComment, scorePostInterest } = require('./src/ai/gemini');
 const {
   ensureDataFiles,
   readCommentedPosts,
+  readTodayCommentedCount,
   writeCommentedPost,
   readTargetProfiles,
 } = require('./src/data/csv');
 
-// ──────────────── Helpers ────────────────
+// ──────────────────── Logging ────────────────────
 
-function log(msg) {
-  console.log(chalk.cyan('[BOT]'), msg);
-}
+const log      = (msg) => console.log(chalk.cyan('[BOT]'), msg);
+const logOk    = (msg) => console.log(chalk.green('[✓]'), msg);
+const logWarn  = (msg) => console.log(chalk.yellow('[!]'), msg);
+const logError = (msg) => console.log(chalk.red('[✗]'), msg);
+const logSkip  = (msg) => console.log(chalk.gray('[→]'), msg);
+const sleep    = (ms)  => new Promise((r) => setTimeout(r, ms));
 
-function logSuccess(msg) {
-  console.log(chalk.green('[✓]'), msg);
-}
-
-function logWarn(msg) {
-  console.log(chalk.yellow('[!]'), msg);
-}
-
-function logError(msg) {
-  console.log(chalk.red('[✗]'), msg);
-}
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-// ──────────────── Main ────────────────
+// ──────────────────── Main ────────────────────
 
 async function main() {
   console.log('');
-  console.log(chalk.bold.blue('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-  console.log(chalk.bold.blue('  🤖 LinkedIn Comment Bot — Powered by Gemini'));
-  console.log(chalk.bold.blue('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+  console.log(chalk.bold.blueBright('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+  console.log(chalk.bold.blueBright('  🤖  LinkedIn Comment Bot  —  Powered by Gemini AI'));
+  console.log(chalk.bold.blueBright('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+
+  const now = new Date();
+  console.log(chalk.gray(`  Run started: ${now.toLocaleString('en-PK', { timeZone: 'Asia/Karachi' })} (PKT)`));
   console.log('');
 
-  // ── Validate Gemini API Key ──
+  // ── 1. Validate Gemini API key ──
   if (!config.geminiApiKey || config.geminiApiKey === 'your_gemini_api_key_here') {
-    logError('GEMINI_API_KEY is not set! Please add it to your .env file.');
+    logError('GEMINI_API_KEY is not set! Add it to your .env file.');
     process.exit(1);
   }
 
-  // ── Ensure data files exist ──
+  // ── 2. Ensure CSV files exist ──
   ensureDataFiles();
 
-  // ── Load already-commented posts ──
-  log('Loading already-commented posts from CSV...');
-  const commentedPosts = await readCommentedPosts();
-  log(`Found ${commentedPosts.size} previously commented post(s).`);
+  // ── 3. Check daily comment quota ──
+  log('Checking today\'s comment count...');
+  const { count: todayCount, todayUrls } = await readTodayCommentedCount();
+  const dailyCap = config.bot.maxCommentsPerRun;
+  const slotsLeft = dailyCap - todayCount;
 
-  // ── Load target profiles ──
-  log('Loading target profiles...');
+  if (todayCount > 0) {
+    log(`Already commented on ${chalk.bold(todayCount)} post(s) today.`);
+  }
+
+  if (slotsLeft <= 0) {
+    console.log('');
+    logOk(`Daily cap of ${dailyCap} comments already reached for today.`);
+    logOk(`Come back tomorrow or increase MAX_COMMENTS_PER_RUN in .env.`);
+    console.log('');
+    return;  // exit gracefully — no browser launch needed
+  }
+
+  log(`${chalk.bold(slotsLeft)} comment slot(s) remaining for today.`);
+  console.log('');
+
+  // ── 4. Load all previously commented posts (for dedup) ──
+  const commentedPosts = await readCommentedPosts();
+  // Also add today's posts to the dedup set (already tracked by readCommentedPosts, but ensure)
+  for (const u of todayUrls) commentedPosts.add(u);
+
+  // ── 5. Load target profiles ──
   const targetProfiles = await readTargetProfiles();
 
-  let allPosts = [];
-
-  // ── Launch browser with session ──
+  // ── 6. Launch browser ──
   log('Launching browser...');
   let browser, page;
   try {
     ({ browser, page } = await createSession());
   } catch (err) {
-    logError(`Failed to create session: ${err.message}`);
+    logError(`Browser launch failed: ${err.message}`);
     process.exit(1);
   }
 
   try {
-    if (targetProfiles.length === 0) {
-      // No target profiles → scrape the home feed
-      logWarn('No target profiles found in data/target_profiles.csv.');
-      log('Falling back to home feed scraping...');
-      const feedPosts = await scrapeFeedPosts(page);
-      allPosts = allPosts.concat(feedPosts);
-    } else {
-      // Scrape each target profile
-      log(`Scraping ${targetProfiles.length} target profile(s)...`);
-      for (const profile of targetProfiles) {
+    // ── 7. Gather posts ──
+    // Always scrape the home feed. Optionally also scrape target profiles.
+    let allPosts = [];
+
+    // Home feed is always the primary source
+    log('Scraping home feed...');
+    const feedPosts = await scrapeFeedPosts(page, 30);
+    allPosts = allPosts.concat(feedPosts);
+
+    // If real (non-example) target profiles exist, scrape those too
+    const realProfiles = targetProfiles.filter(
+      (p) => p.profileUrl && !p.profileUrl.includes('example') && !p.profileUrl.includes('placeholder')
+    );
+    if (realProfiles.length > 0) {
+      log(`\nAlso scraping ${realProfiles.length} target profile(s)...`);
+      for (const profile of realProfiles) {
         const posts = await scrapeProfilePosts(page, profile.profileUrl, profile.name);
         allPosts = allPosts.concat(posts);
         await sleep(randomDelay());
       }
     }
 
-    log(`Total posts found: ${allPosts.length}`);
+    log(`\nTotal raw posts collected: ${chalk.bold(allPosts.length)}`);
 
-    // ── Filter out already-commented posts ──
+    // ── 8. Deduplicate ──
     const newPosts = allPosts.filter((p) => p.postUrl && !commentedPosts.has(p.postUrl));
-    log(`New posts to comment on: ${newPosts.length}`);
+    log(`New posts (not yet commented): ${chalk.bold(newPosts.length)}`);
 
     if (newPosts.length === 0) {
-      logSuccess('No new posts to comment on. All posts have already been commented!');
+      logOk('All visible posts have already been commented on. Nothing to do!');
       return;
     }
 
-    // ── Process posts up to the max limit ──
-    const limit = config.bot.maxCommentsPerRun;
-    let commentCount = 0;
+    // ── 9. AI Interest scoring ──
+    console.log('');
+    log('🔎 Scoring posts for interest level...');
+    const scoredPosts = [];
 
     for (const post of newPosts) {
-      if (commentCount >= limit) {
-        log(`Reached max comments per run (${limit}). Stopping.`);
+      try {
+        const { score, reason, interesting } = await scorePostInterest(post.postText, post.authorName);
+        const badge = interesting ? chalk.green(`[${score}/100 ✓]`) : chalk.gray(`[${score}/100 ✗]`);
+        const truncName = post.authorName.slice(0, 28).padEnd(28);
+        console.log(`  ${badge} ${chalk.bold(truncName)} — ${chalk.italic(reason)}`);
+        if (interesting) scoredPosts.push({ ...post, interestScore: score });
+        await sleep(500);
+      } catch (err) {
+        logWarn(`Scoring failed for "${post.authorName}": ${err.message}`);
+      }
+    }
+
+    // Sort best posts first
+    scoredPosts.sort((a, b) => b.interestScore - a.interestScore);
+
+    console.log('');
+    logOk(`Interesting posts found: ${chalk.bold(scoredPosts.length)}`);
+
+    if (scoredPosts.length === 0) {
+      logWarn('No posts met the interest threshold. Try lowering MIN_INTEREST_SCORE in .env (current: ' + config.bot.minInterestScore + ').');
+      return;
+    }
+
+    // ── 10. Comment loop (up to remaining daily slots) ──
+    let commentCount = 0;
+
+    for (const post of scoredPosts) {
+      if (commentCount >= slotsLeft) {
+        log(`Daily cap reached (${dailyCap} total for today). Stopping.`);
         break;
       }
 
       console.log('');
-      log(`Processing post by: ${chalk.bold(post.authorName)}`);
+      console.log(chalk.bold('─'.repeat(55)));
+      log(`Post by: ${chalk.bold(post.authorName)}  ${chalk.green(`[Score: ${post.interestScore}]`)}`);
+      if (post.authorHeadline) log(`  ${chalk.gray(post.authorHeadline.slice(0, 80))}`);
       log(`URL: ${chalk.underline(post.postUrl)}`);
-      log(`Preview: "${post.postText.slice(0, 120).replace(/\n/g, ' ')}..."`);
+      log(`Preview: "${chalk.italic(post.postText.slice(0, 130).replace(/\n/g, ' '))}..."`);
 
-      // ── Generate comment ──
+      // Generate
       let comment;
       try {
-        log('Generating comment with Gemini AI...');
+        log('Generating AI comment...');
         comment = await generateComment(post.postText, post.authorName);
-        log(`Comment: "${chalk.italic(comment)}"`);
+        log(`Comment: ${chalk.greenBright(`"${comment}"`)}`);
       } catch (err) {
         logError(`Gemini failed: ${err.message}`);
         await sleep(2000);
         continue;
       }
 
-      // ── Post the comment ──
-      log('Posting comment to LinkedIn...');
+      // Post
+      log('Posting comment on LinkedIn...');
       const success = await postComment(page, post.postUrl, comment);
 
       if (success) {
-        logSuccess(`Comment posted on post by ${post.authorName}!`);
-        // Record to CSV
+        logOk(`Comment posted! (${todayCount + commentCount + 1}/${dailyCap} today)`);
         await writeCommentedPost(post.postUrl, post.authorName, comment);
-        commentedPosts.add(post.postUrl); // Update in-memory set
+        commentedPosts.add(post.postUrl);
         commentCount++;
       } else {
-        logWarn(`Failed to comment on post by ${post.authorName}. Skipping.`);
+        logWarn(`Could not comment on post by ${post.authorName}. Skipping.`);
       }
 
-      // ── Human-like delay between comments ──
-      if (commentCount < limit) {
+      // Human-like delay
+      if (commentCount < slotsLeft) {
         const delay = randomDelay();
         log(`Waiting ${(delay / 1000).toFixed(1)}s before next comment...`);
         await sleep(delay);
       }
     }
 
+    // ── Summary ──
+    const totalToday = todayCount + commentCount;
     console.log('');
-    console.log(chalk.bold.green('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-    logSuccess(`Run complete! Posted ${commentCount} comment(s) this session.`);
-    console.log(chalk.bold.green('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+    console.log(chalk.bold.greenBright('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+    logOk(`Posted ${chalk.bold(commentCount)} comment(s) this run — ${chalk.bold(totalToday)}/${dailyCap} for today.`);
+    if (commentCount > 0) {
+      logOk(`Saved to: ${chalk.underline('./data/commented_posts.csv')}`);
+    }
+    if (totalToday >= dailyCap) {
+      logWarn(`Daily cap reached. Next run will exit early until tomorrow.`);
+    } else {
+      log(`${dailyCap - totalToday} slot(s) still available — you can run again later today.`);
+    }
+    console.log(chalk.bold.greenBright('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
     console.log('');
+
   } catch (err) {
     logError(`Unexpected error: ${err.message}`);
     console.error(err);
@@ -184,7 +241,6 @@ async function main() {
   }
 }
 
-// ── Run ──
 main().catch((err) => {
   console.error(chalk.red('Fatal error:'), err);
   process.exit(1);

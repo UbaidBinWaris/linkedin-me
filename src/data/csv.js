@@ -64,6 +64,35 @@ async function readCommentedPosts() {
 }
 
 /**
+ * Counts how many posts have been commented on TODAY (since midnight local time).
+ * @returns {Promise<{count: number, todayUrls: Set<string>}>}
+ */
+async function readTodayCommentedCount() {
+  ensureDataFiles();
+  const todayUrls = new Set();
+
+  const fileContent = fs.readFileSync(config.data.commentedPostsPath, 'utf-8');
+  const lines = fileContent.trim().split('\n');
+
+  // Today's date as YYYY-MM-DD in local time
+  const today = new Date().toISOString().slice(0, 10);
+
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    const cols = parseCSVLine(line);
+    // cols: [post_url, author_name, comment_text, commented_at]
+    const url = cols[0] ? cols[0].replace(/^"|"$/g, '').trim() : '';
+    const timestamp = cols[3] ? cols[3].replace(/^"|"$/g, '').trim() : '';
+    if (url && timestamp && timestamp.startsWith(today)) {
+      todayUrls.add(url);
+    }
+  }
+
+  return { count: todayUrls.size, todayUrls };
+}
+
+/**
  * Appends a new commented post record to the CSV.
  * @param {string} postUrl
  * @param {string} authorName
@@ -152,6 +181,7 @@ function parseCSVLine(line) {
 module.exports = {
   ensureDataFiles,
   readCommentedPosts,
+  readTodayCommentedCount,
   writeCommentedPost,
   readTargetProfiles,
 };
