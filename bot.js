@@ -49,16 +49,18 @@ const sleep    = (ms)  => new Promise((r) => setTimeout(r, ms));
 async function main() {
   console.log('');
   console.log(chalk.bold.blueBright('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
-  console.log(chalk.bold.blueBright('  🤖  LinkedIn Comment Bot  —  Powered by Gemini AI'));
+  console.log(chalk.bold.blueBright('  🤖  LinkedIn Comment Bot  —  Powered by OpenAI'));
   console.log(chalk.bold.blueBright('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
 
   const now = new Date();
   console.log(chalk.gray(`  Run started: ${now.toLocaleString('en-PK', { timeZone: 'Asia/Karachi' })} (PKT)`));
   console.log('');
 
-  // ── 1. Validate Gemini API key ──
-  if (!config.geminiApiKey || config.geminiApiKey === 'your_gemini_api_key_here') {
-    logError('GEMINI_API_KEY is not set! Add it to your .env file.');
+  // ── 1. Validate AI API key (OpenAI or Gemini) ──
+  const hasOpenAI = config.openaiApiKey && config.openaiApiKey.startsWith('sk-') && config.openaiApiKey.length > 20;
+  const hasGemini = config.geminiApiKey && config.geminiApiKey.length > 20;
+  if (!hasOpenAI && !hasGemini) {
+    logError('No AI API key found! Set OPENAI_API_KEY or GEMINI_API_KEY in your .env file.');
     process.exit(1);
   }
 
@@ -129,12 +131,17 @@ async function main() {
 
     log(`\nTotal raw posts collected: ${chalk.bold(allPosts.length)}`);
 
+    if (allPosts.length === 0) {
+      logWarn('No posts found on the feed. Try deleting the ./session folder and re-running.');
+      return;
+    }
+
     // ── 8. Deduplicate ──
     const newPosts = allPosts.filter((p) => p.postUrl && !commentedPosts.has(p.postUrl));
     log(`New posts (not yet commented): ${chalk.bold(newPosts.length)}`);
 
     if (newPosts.length === 0) {
-      logOk('All visible posts have already been commented on. Nothing to do!');
+      logOk('All visible posts have already been commented on today. Nothing to do!');
       return;
     }
 
@@ -190,14 +197,31 @@ async function main() {
         comment = await generateComment(post.postText, post.authorName);
         log(`Comment: ${chalk.greenBright(`"${comment}"`)}`);
       } catch (err) {
-        logError(`Gemini failed: ${err.message}`);
+        logError(`AI failed: ${err.message}`);
         await sleep(2000);
         continue;
       }
 
       // Post
       log('Posting comment on LinkedIn...');
-      const success = await postComment(page, post.postUrl, comment);
+      let success = false;
+      try {
+        success = await postComment(page, post.postUrl, comment);
+      } catch (err) {
+        // If page/browser closed, try to open a new page and continue
+        if (err.message && (err.message.includes('Target page') || err.message.includes('browser has been closed'))) {
+          logWarn('Page closed unexpectedly — reopening...');
+          try {
+            page = await browser.newPage();
+            await page.waitForTimeout(2000);
+          } catch {
+            logError('Browser is gone. Stopping.');
+            break;
+          }
+        } else {
+          logWarn(`Comment error: ${err.message.slice(0, 80)}`);
+        }
+      }
 
       if (success) {
         logOk(`Comment posted! (${todayCount + commentCount + 1}/${dailyCap} today)`);

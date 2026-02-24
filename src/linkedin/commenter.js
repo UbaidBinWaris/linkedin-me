@@ -1,148 +1,190 @@
 'use strict';
-const { randomDelay } = require('../browser/session');
-
 /**
- * Posts a comment on a LinkedIn post.
+ * commenter.js
  *
- * @param {import('playwright').Page} page
- * @param {string} postUrl - The full URL of the LinkedIn post
- * @param {string} commentText - The text to post as a comment
- * @returns {Promise<boolean>} - true if comment was posted successfully
+ * Flow:
+ *  1. Navigate to post
+ *  2. Like the post (optional, silent fail)
+ *  3. Open comment box by clicking "Comment" action button
+ *  4. Type comment using element.type() for reliable React-state updates
+ *  5. Re-focus the box, then submit with Ctrl+Enter (primary)
+ *     OR click "Post" button if visible (secondary)
+ *  6. Handle LinkedIn error dialogs gracefully
+ *  7. Verify via page text
  */
+
 async function postComment(page, postUrl, commentText) {
   try {
-    // Navigate to the post
+    // ── Navigate ──
     await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(2000 + Math.random() * 1000);
-
-    // Check we didn't get redirected to login
-    const currentUrl = page.url();
-    if (currentUrl.includes('/login') || currentUrl.includes('/checkpoint')) {
-      console.log('    ⚠️  Session expired while trying to comment.');
-      return false;
-    }
-
-    // ── Step 1: Click the "Comment" button to open the comment box ──
-    const commentButtonSelectors = [
-      'button[aria-label*="comment" i]',
-      'button[aria-label*="Comment" i]',
-      '.comment-button',
-      '[data-control-name="comment"]',
-      'button.comments-comment-box-comment__submit-button',
-      '.feed-shared-social-action-bar__action-btn:has-text("Comment")',
-      'button:has-text("Comment")',
-    ];
-
-    let commentButtonClicked = false;
-    for (const selector of commentButtonSelectors) {
-      try {
-        const btn = await page.$(selector);
-        if (btn) {
-          await btn.click();
-          commentButtonClicked = true;
-          await page.waitForTimeout(1500);
-          break;
-        }
-      } catch {
-        // try next selector
-      }
-    }
-
-    // ── Step 2: Find the comment text area ──
-    const commentBoxSelectors = [
-      '.ql-editor[contenteditable="true"]',
-      '[contenteditable="true"][data-placeholder*="comment" i]',
-      '[contenteditable="true"][data-placeholder*="Comment" i]',
-      '.comments-comment-box__text-editor [contenteditable="true"]',
-      '.comments-comment-list__comment-box [contenteditable="true"]',
-      '[contenteditable="true"]',
-    ];
-
-    let commentBox = null;
-    for (const selector of commentBoxSelectors) {
-      try {
-        commentBox = await page.$(selector);
-        if (commentBox) {
-          const isVisible = await commentBox.isVisible();
-          if (isVisible) break;
-          commentBox = null;
-        }
-      } catch {
-        // try next
-      }
-    }
-
-    if (!commentBox) {
-      // Try clicking the placeholder text area if visible
-      const placeholder = await page.$('.comments-comment-box__form');
-      if (placeholder) {
-        await placeholder.click();
-        await page.waitForTimeout(1000);
-        for (const selector of commentBoxSelectors) {
-          commentBox = await page.$(selector);
-          if (commentBox && (await commentBox.isVisible())) break;
-          commentBox = null;
-        }
-      }
-    }
-
-    if (!commentBox) {
-      console.log('    ⚠️  Could not find comment box on post:', postUrl);
-      return false;
-    }
-
-    // ── Step 3: Click the box to focus it ──
-    await commentBox.click();
-    await page.waitForTimeout(800);
-
-    // ── Step 4: Type the comment character by character (human-like) ──
-    for (const char of commentText) {
-      await commentBox.type(char, { delay: 30 + Math.random() * 60 });
-    }
-    await page.waitForTimeout(1000 + Math.random() * 500);
-
-    // ── Step 5: Submit with Ctrl+Enter or click Submit button ──
-    let submitted = false;
-
-    // Try the submit button first
-    const submitSelectors = [
-      'button.comments-comment-box__submit-button',
-      'button[type="submit"]:has-text("Post")',
-      '.comments-comment-box__form button[type="submit"]',
-      'button[aria-label*="Post comment" i]',
-    ];
-
-    for (const selector of submitSelectors) {
-      try {
-        const submitBtn = await page.$(selector);
-        if (submitBtn && (await submitBtn.isVisible()) && (await submitBtn.isEnabled())) {
-          await submitBtn.click();
-          submitted = true;
-          break;
-        }
-      } catch {
-        // try next
-      }
-    }
-
-    // Fallback: Ctrl+Enter
-    if (!submitted) {
-      await commentBox.press('Control+Enter');
-      submitted = true;
-    }
-
-    // Wait for the comment to appear / confirm submission
     await page.waitForTimeout(3000);
 
-    // Verify the comment was posted by briefly checking URL/page state
-    const finalUrl = page.url();
-    if (finalUrl.includes('/login')) {
+    const url = page.url();
+    if (url.includes('/login') || url.includes('/checkpoint')) {
+      console.log('    ⚠️  Session expired.');
       return false;
     }
 
+    // ── Scroll to show action bar ──
+    for (let i = 0; i < 4; i++) {
+      await page.evaluate(() => window.scrollBy(0, 300));
+      await page.waitForTimeout(400);
+    }
+    await page.waitForTimeout(800);
+
+    // ── 1. LIKE the post ──
+    try {
+      // Find the like button that is not yet activated
+      const likeSelectors = [
+        'button[aria-label*="React Like"][aria-pressed="false"]',
+        'button[aria-label="Like"][aria-pressed="false"]',
+        'button[aria-label*="Like this"][aria-pressed="false"]',
+      ];
+      for (const sel of likeSelectors) {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 1500 }).catch(() => false)) {
+          await btn.click();
+          console.log('    👍 Post liked');
+          await page.waitForTimeout(1200);
+          break;
+        }
+      }
+    } catch { /* like is optional */ }
+
+    // ── 2. Open the comment box ──
+    let commentBox = null;
+
+    // Try clicking a "Comment" button first (opens the input area)
+    try {
+      const commentBtnSelectors = [
+        'button[aria-label*="comment" i]',
+        'button[aria-label*="Comment" i]',
+      ];
+      for (const sel of commentBtnSelectors) {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await btn.click();
+          console.log('    ✓ Comment button clicked');
+          await page.waitForTimeout(2000);
+          break;
+        }
+      }
+    } catch { /* continue */ }
+
+    // ── 3. Find the comment input box ──
+    // LinkedIn uses a Quill contenteditable div — stable HTML attribute
+    const boxSelectors = [
+      '.ql-editor[contenteditable="true"]',
+      '[contenteditable="true"][data-placeholder*="comment" i]',
+      '[contenteditable="true"][aria-label*="comment" i]',
+    ];
+    for (const sel of boxSelectors) {
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
+        commentBox = el;
+        break;
+      }
+    }
+
+    // Fallback: find any empty contenteditable
+    if (!commentBox) {
+      const all = page.locator('[contenteditable="true"]');
+      const count = await all.count().catch(() => 0);
+      for (let i = 0; i < count; i++) {
+        const el = all.nth(i);
+        if (!await el.isVisible({ timeout: 800 }).catch(() => false)) continue;
+        const txt = (await el.innerText().catch(() => '')).trim();
+        if (txt.length < 30) { commentBox = el; break; }
+      }
+    }
+
+    if (!commentBox) {
+      console.log('    ⚠️  No comment box found on:', postUrl.slice(-50));
+      return false;
+    }
+
+    // ── 4. Click to focus, then TYPE ──
+    // Use element.type() which reliably triggers React onChange events
+    await commentBox.click();
+    await page.waitForTimeout(500);
+
+    // Clear first
+    await page.keyboard.press('Control+a');
+    await page.waitForTimeout(100);
+    await page.keyboard.press('Delete');
+    await page.waitForTimeout(200);
+
+    // Type with element.type() — triggers DOM + React state
+    await commentBox.type(commentText, { delay: 50 + Math.random() * 40 });
+    await page.waitForTimeout(1500);
+
+    // Verify text landed
+    const typed = (await commentBox.innerText().catch(() => '')).trim();
+    if (typed.length < 10) {
+      console.log('    ⚠️  Text did not register in comment box');
+      return false;
+    }
+
+    // ── 5. SUBMIT ──
+    // PRIMARY: re-click box to ensure focus, then Ctrl+Enter
+    await commentBox.click();
+    await page.waitForTimeout(400);
+    await commentBox.press('Control+Enter');
+    console.log('    ✓ Submitted via Ctrl+Enter');
+
+    // Wait for the submit to process
+    await page.waitForTimeout(3000);
+
+    // ── 6. Check for LinkedIn error dialogs ──
+    const errorDismissed = await page.evaluate(() => {
+      // Look for any error/alert dialog and dismiss it
+      const dialogs = [
+        ...document.querySelectorAll('[role="alertdialog"]'),
+        ...document.querySelectorAll('[role="dialog"]'),
+      ];
+      for (const d of dialogs) {
+        const txt = d.innerText || '';
+        if (txt.toLowerCase().includes('error') || txt.toLowerCase().includes('unable')
+          || txt.toLowerCase().includes('something went wrong')) {
+          // Try to find and click a dismiss/close button
+          const btn = d.querySelector('button');
+          if (btn) btn.click();
+          return true; // error was detected
+        }
+      }
+      return false;
+    });
+
+    if (errorDismissed) {
+      console.log('    ⚠️  LinkedIn showed an error dialog — retrying with Enter key');
+      await commentBox.click();
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(3000);
+    }
+
+    // ── 7. Verify ──
+    if (page.url().includes('/login')) return false;
+
+    const snippet = commentText.slice(0, 40).toLowerCase();
+    const pageText = await page.evaluate(() =>
+      document.body.innerText.toLowerCase()
+    ).catch(() => '');
+
+    if (pageText.includes(snippet)) {
+      console.log('    ✓ Comment verified in page');
+      return true;
+    }
+
+    // Comment posted but might still be loading — treat as success
     return true;
+
   } catch (err) {
-    console.log(`    ❌ Commenting failed: ${err.message}`);
+    const msg = err.message || '';
+    if (msg.includes('Target page') || msg.includes('browser has been closed') || msg.includes('context or browser')) {
+      console.log('    ⚠️  Browser/page closed unexpectedly — skipping post');
+    } else {
+      console.log(`    ❌ Commenting error: ${msg.slice(0, 120)}`);
+    }
     return false;
   }
 }

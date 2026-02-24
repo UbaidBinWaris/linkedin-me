@@ -2,7 +2,8 @@
 require('dotenv').config();
 
 const config = {
-  geminiApiKey: process.env.GEMINI_API_KEY || '',
+  geminiApiKey:  process.env.GEMINI_API_KEY  || '',
+  openaiApiKey:  process.env.OPENAI_API_KEY  || '',
   linkedin: {
     email: process.env.LINKEDIN_EMAIL || '',
     password: process.env.LINKEDIN_PASSWORD || '',
