@@ -127,45 +127,84 @@ Respond with ONLY this JSON:
 /**
  * Generates a personalized professional LinkedIn comment.
  *
- * @param {string} postText    - The post content to comment on
- * @param {string} authorName  - Author's name (for context in the prompt)
- * @param {object} [commentStyle] - Optional style from commentStyles.js
- *   { id, label, instruction } — tells the AI HOW to approach the comment
+/**
+ * Generates a personalized professional LinkedIn comment WITH AI reasoning.
+ *
+ * Returns: { comment, interestScore, whyInteresting, bestAngle }
+ *
+ * @param {string} postText    - The post content
+ * @param {string} authorName  - Author's name
+ * @param {object} [commentStyle] - Style from commentStyles.js
  */
 async function generateComment(postText, authorName, commentStyle = null) {
   const { name, headline, about } = config.profile;
 
-  const systemPrompt = `You are writing a LinkedIn comment on behalf of ${name}, a ${headline.split('|')[0].trim()}.`;
-
-  // If a comment style was provided, inject its instruction into the prompt
   const styleInstruction = commentStyle
-    ? `\nWriting approach — ${commentStyle.label}:\n${commentStyle.instruction}\n`
+    ? `\nYour writing approach for this comment — "${commentStyle.label}":\n${commentStyle.instruction}\n`
     : '';
 
-  const userPrompt = `Write a short LinkedIn comment (1-2 sentences, max 150 characters) as ${name}.
+  const systemPrompt = `You are writing a LinkedIn comment on behalf of ${name}, a ${headline.split('|')[0].trim()}. Respond ONLY with valid JSON — no markdown, no explanation outside the JSON.`;
+
+  const userPrompt = `Analyze this LinkedIn post and write a comment as ${name}.
 
 About ${name}:
 ${about}
 ${styleInstruction}
-Rules:
-- Sound like a real human professional, NOT AI-generated
-- Reference something SPECIFIC from the post — not a generic reply
-- Add value: share a developer experience or contrarian thought
-- NO emojis, NO hashtags, NO "Great post!" openers
-- Do NOT mention your own name
-- Do NOT be flattering or sycophantic
-- Always write in a non-formal, conversational way
-
 Post by ${authorName || 'the author'}:
 """
 ${postText.slice(0, 1500)}
 """
 
-Write ONLY the comment text, nothing else:`;
+Comment rules:
+- 1-2 sentences, max 180 characters 
+- Sound like a real human professional, NOT AI-generated
+- Reference something SPECIFIC from the post — not a generic reply
+- NO emojis, NO hashtags, NO "Great post!" openers
+- Do NOT mention ${name}'s own name
+- Do NOT be sycophantic or flattering
+- Conversational, not formal
 
-  const text = await generateText(systemPrompt, userPrompt);
-  if (!text || text.length < 15) throw new Error('AI returned empty comment');
-  return text;
+Respond with ONLY this JSON:
+{
+  "interest_score": <0-100, how worth commenting this post is>,
+  "why_interesting": "<one concise sentence explaining what makes this post valuable>",
+  "best_angle": "<one sentence on the most effective angle for a comment>",
+  "comment": "<the actual comment text>"
+}`;
+
+  try {
+    const raw = await generateText(systemPrompt, userPrompt);
+    const cleaned = raw.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
+    const parsed = JSON.parse(cleaned);
+
+    if (!parsed.comment || parsed.comment.length < 10) {
+      throw new Error('AI returned empty comment in JSON');
+    }
+
+    return {
+      comment:        parsed.comment.trim(),
+      interestScore:  typeof parsed.interest_score === 'number' ? parsed.interest_score : 50,
+      whyInteresting: parsed.why_interesting || '',
+      bestAngle:      parsed.best_angle || '',
+    };
+  } catch (e) {
+    // Fallback: try raw text generation without JSON structure
+    console.log('    ⚠️  JSON comment generation failed, falling back to raw text...');
+    const fallbackPrompt = `Write a 1-2 sentence LinkedIn comment as ${name} on this post by ${authorName}.
+${styleInstruction}
+Post: "${postText.slice(0, 800)}"
+
+Rules: No emojis, no "Great post!", reference something specific, be concise (under 180 chars).
+Write ONLY the comment text:`;
+
+    const raw = await generateText(systemPrompt, fallbackPrompt);
+    return {
+      comment:        raw.trim(),
+      interestScore:  50,
+      whyInteresting: 'Fallback mode',
+      bestAngle:      '',
+    };
+  }
 }
 
 // ── Heuristic fallback ───────────────────────────────────────────
@@ -182,3 +221,4 @@ function estimateHeuristic(text) {
 }
 
 module.exports = { generateComment, scorePostInterest };
+

@@ -1,65 +1,89 @@
 'use strict';
-
 /**
- * commentStyles.js — Modular comment writing strategies
+ * commentStyles.js — 6 comment writing strategies with session-level Style Memory.
  *
- * Each style tells the AI HOW to write the comment.
- * A random style is picked each run so your comments feel varied.
- *
- * To add your own style: push a new object into COMMENT_STYLES.
+ * Style memory prevents the same style from being used consecutively.
+ * The last 3 used style IDs are tracked per process run.
  */
 
 const COMMENT_STYLES = [
   {
-    id: 'experiential',
-    label: 'Share Personal Experience',
-    instruction:
-      'Reference a real, specific experience you have had as a developer that relates to this post. ' +
-      'Be concrete — mention a tech, project type, or scenario. Do NOT be generic.',
+    id:          'experiential',
+    label:       'Share Personal Experience',
+    instruction: `Reference a real, specific experience from your work as a developer, builder, or automation engineer.
+Use concrete detail (a tool, a situation, a result) — not generic advice.
+Example pattern: "When I built [X], I ran into exactly this — what helped was [Y]."
+Keep it to 1-2 sentences. First person, genuine, no filler.`,
   },
   {
-    id: 'contrarian',
-    label: 'Gentle Contrarian Take',
-    instruction:
-      'Disagree with or add nuance to a point in the post in a respectful, intellectual way. ' +
-      'Say why you see it differently based on your own developer experience.',
+    id:          'contrarian',
+    label:       'Gentle Contrarian Take',
+    instruction: `Disagree with or add nuance to the post — respectfully and with a reason.
+State what you agree with first, then pivot to the thing that's often missed or oversimplified.
+Example pattern: "This is true for [X] — though in my experience, [counterpoint]."
+Must be respectful. Never dismissive. 1-2 sentences.`,
   },
   {
-    id: 'analytical',
-    label: 'Add Analytical Depth',
-    instruction:
-      'Pick the most interesting technical or business claim in the post and expand on WHY it works or ' +
-      'what the trade-offs are. Add one insight the author did not mention.',
+    id:          'analytical',
+    label:       'Add Analytical Depth',
+    instruction: `Expand on a trade-off, second-order effect, or nuance the author didn't explore.
+Think like an engineer reviewing a technical decision: what are the edge cases? What scales? What fails?
+1-2 sentences. Add signal, not just agreement.`,
   },
   {
-    id: 'question',
-    label: 'Thoughtful Question',
-    instruction:
-      'Ask a single, specific, genuinely curious question that digs deeper into one aspect of the post. ' +
-      'The question should show you actually read and understood the content.',
+    id:          'question',
+    label:       'Thoughtful Question',
+    instruction: `Ask ONE specific, curious question that shows you read and thought about the post.
+The question should signal expertise — not "what do you think?" but something that opens a real thread.
+Example: "Have you found [specific aspect] changes at [specific scale]?"
+1 sentence. Genuine curiosity, not rhetorical.`,
   },
   {
-    id: 'parallel',
-    label: 'Draw a Parallel',
-    instruction:
-      'Connect what the author described to a pattern you have seen in software engineering, ' +
-      'team dynamics, or product development. Make the parallel explicit and specific.',
+    id:          'parallel',
+    label:       'Draw a Parallel',
+    instruction: `Connect the author's point to a pattern you've seen in software engineering, systems design, or automation.
+Use concrete domain language. Show you see the bigger principle behind the post.
+Example: "This mirrors [known concept/pattern] — [why it's similar and why it matters]."
+1-2 sentences.`,
   },
   {
-    id: 'builder',
-    label: 'Builder Perspective',
-    instruction:
-      'React from the perspective of someone who has built or shipped a real product. ' +
-      'What would this mean in practice when building? What would you do differently?',
+    id:          'builder',
+    label:       'Builder Perspective',
+    instruction: `React as someone who has shipped a real product or automation. Be specific about what worked or didn't.
+Show you've been in the trenches — reference a real outcome, number, or scenario.
+Example: "Shipped something similar last [year/quarter] — the real challenge was [X], not [Y the author implied]."
+1-2 sentences. Confident, grounded.`,
   },
 ];
 
+// ─────────────────────────────────────────────────────────────────
+//  STYLE MEMORY — tracks last 3 styles used this session
+// ─────────────────────────────────────────────────────────────────
+
+const recentStyleIds = [];  // persists in memory per process run
+
 /**
- * Picks one comment style at random.
+ * Picks a random style, avoiding the last 3 used ones (if pool is large enough).
  * @returns {{ id, label, instruction }}
  */
 function pickRandomStyle() {
-  return COMMENT_STYLES[Math.floor(Math.random() * COMMENT_STYLES.length)];
+  const available = COMMENT_STYLES.filter((s) => !recentStyleIds.includes(s.id));
+  const pool = available.length > 0 ? available : COMMENT_STYLES;
+
+  const picked = pool[Math.floor(Math.random() * pool.length)];
+
+  // Remember this style; keep at most 3
+  recentStyleIds.push(picked.id);
+  if (recentStyleIds.length > 3) recentStyleIds.shift();
+
+  return picked;
 }
 
-module.exports = { COMMENT_STYLES, pickRandomStyle };
+/**
+ * Returns the style memory (for logging).
+ */
+function getStyleMemory() {
+  return [...recentStyleIds];
+}
+
+module.exports = { COMMENT_STYLES, pickRandomStyle, getStyleMemory };

@@ -2,20 +2,16 @@
 /**
  * feed.js — LinkedIn feed scraper + post finder
  *
- * Uses FOUR strategies in order, stopping at the first that finds posts:
+ * Uses 3 DOM strategies (link walk → data-urn → body text).
+ * Applies hard filters + composite scoring to all candidates.
+ * Returns the HIGHEST-SCORED post the bot hasn't already interacted with.
  *
- *  Strategy A: Link-walk on /posts/ URLs (current LinkedIn format)
- *  Strategy B: Link-walk on /feed/update/ URLs (older format)
- *  Strategy C: data-urn walk (find activity URNs and build URLs)
- *  Strategy D: body.innerText parsing — split by known author patterns,
- *              no URL needed — returns posts even if URL is missing
- *
- * Exported:
- *   findOneInterestingPost(page, commentedUrls) → post | null
- *   scrapeProfilePosts(page, profileUrl, name)  → post[]
+ * Accepts recentAuthors so the 7-day author cooldown is enforced
+ * INSIDE the ranking loop — not outside — so we fall through to
+ * the next-best post instead of exiting.
  */
 
-const { shouldSkip, heuristicInterestScore } = require('./filters');
+const { shouldSkip, compositeScore } = require('./filters');
 
 // ─────────────────────────────────────────────────────────────────
 //  NAVIGATION
@@ -28,7 +24,6 @@ async function ensureOnFeed(page) {
     return;
   }
   console.log('  Navigating to LinkedIn feed...');
-  // Try clicking the Home icon first (natural)
   const clicked = await page.evaluate(() => {
     const l = document.querySelector('a[href="/feed/"]') ||
               document.querySelector('a[href="https://www.linkedin.com/feed/"]');
@@ -44,61 +39,129 @@ async function ensureOnFeed(page) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  SCROLL
+//  SCROLL — randomized amounts for human realism
 // ─────────────────────────────────────────────────────────────────
 
 async function scrollFeed(page, passes = 10) {
-  console.log(`  Scrolling (${passes} passes)...`);
+  console.log(`  Scrolling feed (${passes} passes)...`);
   for (let i = 0; i < passes; i++) {
-    await page.evaluate(() => window.scrollBy(0, 600));
-    await page.waitForTimeout(900);
+    const amount = 400 + Math.floor(Math.random() * 500);
+    await page.evaluate((px) => window.scrollBy(0, px), amount);
+    await page.waitForTimeout(700 + Math.floor(Math.random() * 600));
   }
-  // Scroll back near the top so we see everything
   await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(1200);
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  STRATEGY A + B — Link walk (multiple URL patterns)
+//  ENGAGEMENT EXTRACTION — parses "1.2K reactions · 45 comments"
+// ─────────────────────────────────────────────────────────────────
+
+function parseEngagement(cardText = '') {
+  let reactionCount = 0;
+  let commentCount  = 0;
+  const reactionMatch = cardText.match(/([\d,\.]+\s*[Kk]?)\s+reactions?/i);
+  const commentMatch  = cardText.match(/([\d,\.]+\s*[Kk]?)\s+comments?/i);
+  if (reactionMatch) reactionCount = parseCount(reactionMatch[1]);
+  if (commentMatch)  commentCount  = parseCount(commentMatch[1]);
+  return { reactionCount, commentCount };
+}
+
+function parseCount(str = '') {
+  const s = str.replace(/,/g, '').trim().toUpperCase();
+  if (s.includes('K')) return Math.round(parseFloat(s) * 1000);
+  return parseInt(s) || 0;
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  IS REAL AUTHOR NAME?
+//  Filters out LinkedIn UI labels like "Feed post number 3",
+//  "LinkedIn Member", "Unknown", single-word noise, etc.
+// ─────────────────────────────────────────────────────────────────
+
+function isRealAuthorName(name = '') {
+  if (!name || name.length < 3 || name.length > 80) return false;
+  const lower = name.toLowerCase();
+  const fakePatterns = [
+    /^feed post/i,
+    /^linkedin member/i,
+    /^unknown/i,
+    /^post number/i,
+    /^sponsored/i,
+    /^promoted/i,
+    /^\d+$/,               // pure number
+    /^see more/i,
+    /^following/i,
+    /^follow$/i,
+    /^connect$/i,
+    /^message$/i,
+    /^like$/i,
+    /^comment$/i,
+    /^share$/i,
+    /^send$/i,
+  ];
+  if (fakePatterns.some((re) => re.test(lower))) return false;
+  // A real name should have at least one letter
+  if (!/[a-zA-Z]/.test(name)) return false;
+  return true;
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  AUTHOR NAME PARSER — shared logic for DOM text → author name
+// ─────────────────────────────────────────────────────────────────
+
+function parseAuthorFromLines(lines) {
+  let authorName    = '';
+  let authorHeadline = '';
+  let bodyStart      = 0;
+
+  for (let i = 0; i < Math.min(lines.length, 15); i++) {
+    const ln = lines[i];
+    const wc = ln.split(/\s+/).filter(Boolean).length;
+
+    if (!ln || ln.length > 80 || ln.includes('http')) {
+      if (authorName) break;
+      continue;
+    }
+
+    if (!authorName) {
+      if (wc >= 1 && wc <= 8 && isRealAuthorName(ln)) {
+        authorName = ln;
+        bodyStart  = i + 1;
+      }
+    } else if (!authorHeadline && wc <= 14) {
+      authorHeadline = ln;
+      bodyStart = i + 1;
+    } else {
+      break;
+    }
+  }
+
+  const postText = lines.slice(bodyStart).join(' ').trim();
+  return { authorName: authorName || 'Unknown', authorHeadline, postText };
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  STRATEGY A+B — Link Walk on /posts/ and /feed/update/ anchors
 // ─────────────────────────────────────────────────────────────────
 
 async function collectByLinkWalk(page) {
   return page.evaluate(() => {
-    const results = [];
+    const results  = [];
     const seenUrls = new Set();
 
-    // All known LinkedIn post URL patterns
-    const selectors = [
-      // Current format (2024-2025): /posts/username_activity-xxx/
-      'a[href*="/posts/"]',
-      // Legacy format: /feed/update/urn:li:activity:xxx
-      'a[href*="/feed/update/"]',
-      // Another pattern used in some regions
-      'a[href*="ugcPost"]',
-      // Activity URN pattern
-      'a[href*="activity"]',
-    ];
-
-    const anchors = new Set();
-    for (const sel of selectors) {
-      document.querySelectorAll(sel).forEach((a) => anchors.add(a));
-    }
+    const anchors = new Set([
+      ...document.querySelectorAll('a[href*="/posts/"]'),
+      ...document.querySelectorAll('a[href*="/feed/update/"]'),
+      ...document.querySelectorAll('a[href*="ugcPost"]'),
+      ...document.querySelectorAll('a[href*="activity"]'),
+    ]);
 
     for (const anchor of anchors) {
       const href = anchor.getAttribute('href') || '';
       if (!href) continue;
-
-      // Skip navigation links, profile links, company links etc.
-      if (
-        href.includes('/company/') ||
-        href.includes('/jobs/') ||
-        href.includes('/learning/') ||
-        href.includes('/messaging/') ||
-        href.includes('/notifications/') ||
-        href.includes('/mynetwork/') ||
-        href === '/feed/' ||
-        href === '/'
-      ) continue;
+      if (/\/(company|jobs|learning|messaging|notifications|mynetwork)\/?/.test(href)) continue;
+      if (href === '/feed/' || href === '/') continue;
 
       const url = href.startsWith('http')
         ? href.split('?')[0]
@@ -107,94 +170,65 @@ async function collectByLinkWalk(page) {
       if (seenUrls.has(url)) continue;
       seenUrls.add(url);
 
-      // Walk UP to find the containing post card with enough text
+      // Walk UP to find post card (150-30000 chars)
       let el = anchor.parentElement;
-      let postText = '';
-      for (let depth = 0; depth < 25 && el && el.tagName !== 'BODY'; depth++) {
+      let cardText = '';
+      for (let d = 0; d < 25 && el && el.tagName !== 'BODY'; d++) {
         const t = (el.innerText || '').trim();
-        // A post card: between 150 and 30000 chars
-        if (t.length >= 150 && t.length <= 30000) {
-          postText = t;
-          break;
-        }
+        if (t.length >= 150 && t.length <= 30000) { cardText = t; break; }
         el = el.parentElement;
       }
+      if (!cardText || cardText.length < 120) continue;
 
-      if (!postText || postText.length < 80) continue;
-
-      // Parse author and body from the text block
-      const lines = postText.split('\n').map((l) => l.trim()).filter(Boolean);
-
-      // Author name heuristic: first short line (≤70 chars, ≤8 words)
-      let authorName = 'Unknown';
-      let authorHeadline = '';
-      let bodyStart = 0;
-      for (let i = 0; i < Math.min(lines.length, 12); i++) {
-        const ln = lines[i];
-        if (ln.length <= 70 && !ln.includes('http')) {
-          const wc = ln.split(' ').filter(Boolean).length;
-          if (!authorName || authorName === 'Unknown') {
-            if (wc >= 1 && wc <= 8) { authorName = ln; bodyStart = i + 1; }
-          } else if (!authorHeadline && wc <= 14) {
-            authorHeadline = ln; bodyStart = i + 1;
-          } else { break; }
-        } else { if (authorName !== 'Unknown') break; }
-      }
-
-      const body = lines.slice(bodyStart).join(' ').trim();
-      if (body.length < 80) continue;
-
-      results.push({ postUrl: url, postText: body, authorName, authorHeadline });
+      results.push({ postUrl: url, cardText });
     }
+
     return results;
-  });
+  }).then((raw) =>
+    raw.map(({ postUrl, cardText }) => {
+      const lines = cardText.split('\n').map((l) => l.trim()).filter(Boolean);
+      const { authorName, authorHeadline, postText } = parseAuthorFromLines(lines);
+      return { postUrl, authorName, authorHeadline, postText, cardText };
+    }).filter((p) => p.postText.length >= 80)
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────
 //  STRATEGY C — data-urn walk
-//  LinkedIn decorates post containers with data-urn="urn:li:activity:..."
 // ─────────────────────────────────────────────────────────────────
 
 async function collectByDataUrn(page) {
   return page.evaluate(() => {
     const results = [];
-    const seen = new Set();
+    const seen    = new Set();
+    const elems   = document.querySelectorAll('[data-urn*="activity"],[data-id*="activity"],[data-entity-urn]');
 
-    const elements = document.querySelectorAll('[data-urn*="activity"], [data-id*="activity"], [data-entity-urn]');
-    for (const el of elements) {
+    for (const el of elems) {
       const urn = el.getAttribute('data-urn') || el.getAttribute('data-id') || el.getAttribute('data-entity-urn') || '';
       if (!urn || seen.has(urn)) continue;
       seen.add(urn);
 
-      // Build a post URL from the URN
       const match = urn.match(/activity[:\-](\d+)/);
-      const activityId = match ? match[1] : '';
-      const postUrl = activityId
-        ? `https://www.linkedin.com/feed/update/urn:li:activity:${activityId}/`
-        : '';
+      if (!match) continue;
+      const postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${match[1]}/`;
 
-      if (!postUrl) continue;
+      const cardText = (el.innerText || '').trim();
+      if (cardText.length < 150) continue;
 
-      // Extract text from the container
-      const text = (el.innerText || '').trim();
-      if (text.length < 150) continue;
-
-      const lines = text.split('\n').map((l) => l.trim()).filter(Boolean);
-      let authorName = lines[0] || 'Unknown';
-      let authorHeadline = lines[1] || '';
-      const body = lines.slice(2).join(' ').trim();
-      if (body.length < 80) continue;
-
-      results.push({ postUrl, postText: body, authorName, authorHeadline });
+      results.push({ postUrl, cardText });
     }
     return results;
-  });
+  }).then((raw) =>
+    raw.map(({ postUrl, cardText }) => {
+      const lines = cardText.split('\n').map((l) => l.trim()).filter(Boolean);
+      const { authorName, authorHeadline, postText } = parseAuthorFromLines(lines);
+      return { postUrl, authorName, authorHeadline, postText, cardText };
+    }).filter((p) => p.postText.length >= 80)
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  STRATEGY D — body.innerText parse (URL-free fallback)
-//  The most resilient approach — works even with no post links.
-//  We split the page text into chunks and treat each as a potential post.
+//  STRATEGY D — body.innerText fallback
 // ─────────────────────────────────────────────────────────────────
 
 async function collectByBodyText(page) {
@@ -202,52 +236,32 @@ async function collectByBodyText(page) {
   if (bodyText.length < 500) return [];
 
   const results = [];
-  const seen = new Set();
-
-  // Split on blank lines (paragraph boundary)
-  const chunks = bodyText.split(/\n{2,}/);
+  const seen    = new Set();
+  const chunks  = bodyText.split(/\n{2,}/);
 
   for (const chunk of chunks) {
     const trimmed = chunk.trim();
-    // A post body: 120-5000 chars, more than 5 words
     if (trimmed.length < 120 || trimmed.length > 5000) continue;
-    const wordCount = trimmed.split(/\s+/).length;
-    if (wordCount < 10) continue;
-
-    // Skip if it looks like nav / UI chrome
+    if (trimmed.split(/\s+/).length < 10) continue;
     const lower = trimmed.toLowerCase();
-    if (
-      lower.startsWith('home') || lower.startsWith('my network') ||
-      lower.startsWith('jobs') || lower.startsWith('messaging') ||
-      lower.startsWith('notifications') || lower.startsWith('search')
-    ) continue;
+    if (/^(home|my network|jobs|messaging|notifications|search)/.test(lower)) continue;
 
     const key = trimmed.slice(0, 50);
     if (seen.has(key)) continue;
     seen.add(key);
 
-    // Best-effort author: first line
-    const lines = trimmed.split('\n').map((l) => l.trim()).filter(Boolean);
-    const authorName = lines[0] || 'Unknown';
-    const body = lines.slice(1).join(' ').trim() || trimmed;
-
-    // We don't have a URL — use a placeholder so the commenter can find the post
-    results.push({
-      postUrl: null,  // URL unknown — bot will navigate by search or skip
-      postText: body,
-      authorName,
-      authorHeadline: lines[1] || '',
-    });
+    const lines       = trimmed.split('\n').map((l) => l.trim()).filter(Boolean);
+    const { authorName, authorHeadline, postText } = parseAuthorFromLines(lines);
+    results.push({ postUrl: null, authorName, authorHeadline, postText, cardText: trimmed });
   }
-
   return results;
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  DEDUPLICATE + FILTER
+//  DEDUP
 // ─────────────────────────────────────────────────────────────────
 
-function deduplicatePosts(posts) {
+function dedup(posts) {
   const seenUrls = new Set();
   const seenText = new Set();
   return posts.filter((p) => {
@@ -263,31 +277,37 @@ function deduplicatePosts(posts) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  MAIN EXPORT
+//  MAIN
 // ─────────────────────────────────────────────────────────────────
 
-async function findOneInterestingPost(page, commentedUrls = new Set()) {
+/**
+ * Finds the highest-scored interesting post from the feed.
+ *
+ * @param {Page}    page
+ * @param {Set}     commentedUrls  - Post URLs already commented on
+ * @param {Set}     recentAuthors  - Author names engaged in last 7 days (lowercase)
+ * @returns {Promise<object|null>}
+ */
+async function findOneInterestingPost(page, commentedUrls = new Set(), recentAuthors = new Set()) {
   await ensureOnFeed(page);
   await scrollFeed(page, 10);
 
-  // Run all strategies, stop when one finds posts
   let posts = [];
   const strategies = [
-    { name: 'Link-walk (A+B)', fn: () => collectByLinkWalk(page) },
-    { name: 'data-urn walk (C)', fn: () => collectByDataUrn(page) },
-    { name: 'body.innerText parse (D)', fn: () => collectByBodyText(page) },
+    { name: 'Link-walk (/posts/ + /feed/update/)', fn: () => collectByLinkWalk(page) },
+    { name: 'data-urn walk',                       fn: () => collectByDataUrn(page) },
+    { name: 'body.innerText parse',                fn: () => collectByBodyText(page) },
   ];
 
   for (const { name, fn } of strategies) {
-    console.log(`  Trying strategy: ${name}...`);
+    console.log(`  Trying: ${name}...`);
     try {
       const found = await fn();
       if (found.length > 0) {
-        console.log(`  ✓ Strategy "${name}" found ${found.length} post(s).`);
+        console.log(`  ✓ Found ${found.length} post(s).`);
         posts = found;
         break;
       }
-      console.log(`    → 0 posts found.`);
     } catch (e) {
       console.log(`    → Error: ${e.message.slice(0, 60)}`);
     }
@@ -295,66 +315,86 @@ async function findOneInterestingPost(page, commentedUrls = new Set()) {
 
   if (posts.length === 0) {
     console.log('\n  ⚠️  All strategies found 0 posts.');
-    console.log('  Possible causes:');
-    console.log('    1. LinkedIn session shows a blank/empty feed');
-    console.log('    2. Anti-bot detection — try deleting ./session and logging in fresh');
-    console.log('    3. LinkedIn changed its DOM again — run: node debug-feed.js to inspect');
+    console.log('  → Run: node debug-feed.js to inspect live DOM');
     return null;
   }
 
-  posts = deduplicatePosts(posts);
+  posts = dedup(posts);
+  const total = posts.length;
+  console.log(`\n  ${total} unique post(s) to evaluate.\n`);
 
-  console.log('\n  Candidates:');
-  for (const p of posts.slice(0, 8)) {
-    const name = (p.authorName || 'Unknown').slice(0, 30).padEnd(30);
-    const preview = p.postText.slice(0, 55).replace(/\n/g, ' ');
-    console.log(`    • ${name}  "${preview}..."`);
-  }
+  // ── Score every candidate ───────────────────────────────────────
+  const candidates = [];
 
-  console.log('\n  Applying filters...');
-  for (const post of posts) {
-    const { postUrl, postText, authorName, authorHeadline } = post;
+  for (let i = 0; i < posts.length; i++) {
+    const post = posts[i];
 
-    // Skip if no URL (Strategy D) and nothing to navigate to
-    if (!postUrl) {
-      console.log(`  [SKIP] No URL resolved for post by ${authorName}`);
+    // Require a valid URL
+    if (!post.postUrl) {
+      console.log(`  [SKIP] No URL → ${post.authorName}`);
       continue;
     }
 
-    // Dedup check
-    if (commentedUrls.has(postUrl)) {
-      console.log(`  [SKIP] Already commented → ${authorName}`);
+    // URL dedup
+    if (commentedUrls.has(post.postUrl)) {
+      console.log(`  [SKIP] Already commented → ${post.authorName}`);
       continue;
     }
 
-    // Author / post type check
-    const { skip, reason } = shouldSkip(authorName, authorHeadline, postText);
+    // Hard content/author filters
+    const { skip, reason } = shouldSkip(post.authorName, post.authorHeadline, post.postText);
     if (skip) {
-      console.log(`  [SKIP] ${reason} → ${authorName}`);
+      console.log(`  [SKIP] ${reason} → ${post.authorName}`);
       continue;
     }
 
-    // Interest score
-    const { score, interesting } = heuristicInterestScore(postText);
-    if (!interesting) {
-      console.log(`  [SKIP] Low interest score (${score}) → ${authorName}`);
+    // 7-day author cooldown — skip here inside loop so we fall to next candidate
+    if (recentAuthors.has((post.authorName || '').toLowerCase())) {
+      console.log(`  [SKIP] Author cooldown (7d) → ${post.authorName}`);
       continue;
     }
 
-    console.log(`\n  ✅ Picked: "${authorName}" (score: ${score}/100)`);
-    return post;
+    // Engagement
+    const { reactionCount, commentCount } = parseEngagement(post.cardText || '');
+
+    // Composite score
+    const { total: score, breakdown, shouldComment } = compositeScore({
+      postText:       post.postText,
+      authorHeadline: post.authorHeadline,
+      reactionCount,
+      commentCount,
+      positionIndex:  i,
+      totalPosts:     total,
+    });
+
+    const nameStr = (post.authorName || 'Unknown').slice(0, 28).padEnd(28);
+    const engStr  = reactionCount ? `${reactionCount}👍 ${commentCount}💬` : 'no engagement data';
+    const mark    = shouldComment ? '[✓]' : '[✗]';
+    console.log(`  ${mark} ${nameStr} | score:${score} (H:${breakdown.heuristic} E:${breakdown.engagement} S:${breakdown.seniority} N:${breakdown.niche} R:${breakdown.recency}) | ${engStr}`);
+
+    if (shouldComment) {
+      candidates.push({ ...post, reactionCount, commentCount, compositeScore: score, breakdown });
+    }
   }
 
-  console.log('\n  ⚠️  All posts were filtered out.');
-  console.log('  Tips:');
-  console.log('    • Run: node debug-feed.js   ← inspects what is actually in the DOM');
-  console.log('    • Lower MIN_INTEREST_SCORE in .env');
-  console.log('    • Edit GOOD_SIGNALS in src/linkedin/filters.js');
-  return null;
+  if (candidates.length === 0) {
+    console.log('\n  ⚠️  No posts met the composite score threshold (30/100).');
+    console.log('  → Lower MIN_INTEREST_SCORE or broaden NICHE_SIGNALS in filters.js');
+    return null;
+  }
+
+  // Sort descending — pick the best
+  candidates.sort((a, b) => b.compositeScore - a.compositeScore);
+  const winner = candidates[0];
+
+  console.log(`\n  🏆 Best post: "${winner.authorName}" (composite: ${winner.compositeScore}/100)`);
+  console.log(`     Breakdown: H${winner.breakdown.heuristic} E${winner.breakdown.engagement} S${winner.breakdown.seniority} N${winner.breakdown.niche} R${winner.breakdown.recency}`);
+
+  return winner;
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  PROFILE SCRAPER (optional)
+//  PROFILE SCRAPER
 // ─────────────────────────────────────────────────────────────────
 
 async function scrapeProfilePosts(page, profileUrl, profileName) {
@@ -371,11 +411,46 @@ async function scrapeProfilePosts(page, profileUrl, profileName) {
     }
     const found = await collectByLinkWalk(page);
     for (const p of found) posts.push({ ...p, authorName: profileName || p.authorName });
-    console.log(`  Got ${posts.length} post(s) from ${profileName}`);
   } catch (e) {
     console.log(`  Error: ${e.message}`);
   }
   return posts;
+}
+
+// parseAuthorFromLines needs to be available in this module scope
+// (called from the .then() chains above — hoisted via function declaration)
+function parseAuthorFromLines(lines) {
+  let authorName     = '';
+  let authorHeadline = '';
+  let bodyStart      = 0;
+
+  for (let i = 0; i < Math.min(lines.length, 15); i++) {
+    const ln = lines[i];
+    const wc = ln.split(/\s+/).filter(Boolean).length;
+
+    if (!ln || ln.length > 80 || ln.includes('http')) {
+      if (authorName) break;
+      continue;
+    }
+
+    // Reject known fake/accessibility names
+    if (/^(feed post|linkedin member|sponsored|promoted|see more|following|connect|message|like|comment|share|send|\d+)$/i.test(ln)) continue;
+
+    if (!authorName) {
+      if (wc >= 1 && wc <= 8 && /[a-zA-Z]/.test(ln)) {
+        authorName = ln;
+        bodyStart  = i + 1;
+      }
+    } else if (!authorHeadline && wc <= 14) {
+      authorHeadline = ln;
+      bodyStart = i + 1;
+    } else {
+      break;
+    }
+  }
+
+  const postText = lines.slice(bodyStart).join(' ').trim();
+  return { authorName: authorName || 'Unknown', authorHeadline, postText };
 }
 
 module.exports = { findOneInterestingPost, scrapeProfilePosts };
