@@ -126,25 +126,35 @@ Respond with ONLY this JSON:
 // ── Comment generation ───────────────────────────────────────────
 /**
  * Generates a personalized professional LinkedIn comment.
+ *
+ * @param {string} postText    - The post content to comment on
+ * @param {string} authorName  - Author's name (for context in the prompt)
+ * @param {object} [commentStyle] - Optional style from commentStyles.js
+ *   { id, label, instruction } — tells the AI HOW to approach the comment
  */
-async function generateComment(postText, authorName) {
+async function generateComment(postText, authorName, commentStyle = null) {
   const { name, headline, about } = config.profile;
 
   const systemPrompt = `You are writing a LinkedIn comment on behalf of ${name}, a ${headline.split('|')[0].trim()}.`;
+
+  // If a comment style was provided, inject its instruction into the prompt
+  const styleInstruction = commentStyle
+    ? `\nWriting approach — ${commentStyle.label}:\n${commentStyle.instruction}\n`
+    : '';
 
   const userPrompt = `Write a short LinkedIn comment (1-2 sentences, max 150 characters) as ${name}.
 
 About ${name}:
 ${about}
-
+${styleInstruction}
 Rules:
 - Sound like a real human professional, NOT AI-generated
 - Reference something SPECIFIC from the post — not a generic reply
 - Add value: share a developer experience or contrarian thought
 - NO emojis, NO hashtags, NO "Great post!" openers
 - Do NOT mention your own name
-- Do NOT be flattering or sycophantic 
-- Alaways write in in non-formal way
+- Do NOT be flattering or sycophantic
+- Always write in a non-formal, conversational way
 
 Post by ${authorName || 'the author'}:
 """
