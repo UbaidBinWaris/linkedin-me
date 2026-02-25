@@ -125,41 +125,106 @@ async function postComment(page, postUrl, commentText) {
       return false;
     }
 
-    // ── 5. SUBMIT ──
-    // PRIMARY: re-click box to ensure focus, then Ctrl+Enter
-    await commentBox.click();
-    await page.waitForTimeout(400);
-    await commentBox.press('Control+Enter');
-    console.log('    ✓ Submitted via Ctrl+Enter');
+    // ── 5. SUBMIT — click the blue "Comment" button ──
+    // NOTE: Ctrl+Enter adds a NEWLINE in LinkedIn's Quill editor.
+    //       We must click the visible "Comment" submit button instead.
 
-    // Wait for the submit to process
-    await page.waitForTimeout(3000);
+    // Blur the text box first so the submit button becomes active
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(300);
+    await commentBox.click();  // re-focus so button stays active
+    await page.waitForTimeout(500);
+
+    // List of selectors that cover the blue "Comment" submit button
+    // across different LinkedIn UI versions
+    const submitSelectors = [
+      // Exact label match
+      'button[aria-label="Comment"]',
+      'button[aria-label="Post comment"]',
+      'button[aria-label="Submit comment"]',
+      // Class-based (LinkedIn renders a specific class on the submit btn)
+      'button.comments-comment-box__submit-button',
+      'button.comment-button',
+      // Generic: any visible <button> whose text is exactly "Comment" or "Post"
+      'button:has-text("Comment")',
+      'button:has-text("Post")',
+    ];
+
+    let submitted = false;
+    for (const sel of submitSelectors) {
+      try {
+        const btn = page.locator(sel).last();  // last = innermost, most specific
+        if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await btn.click();
+          console.log(`    ✓ Submitted via button: ${sel}`);
+          submitted = true;
+          break;
+        }
+      } catch { /* try next selector */ }
+    }
+
+    // Last resort: find any button near the comment box that could be the submit
+    if (!submitted) {
+      console.log('    ⚠️  Named submit button not found — trying nearby button...');
+      const found = await page.evaluate(() => {
+        // Walk up from the Quill editor and look for a submit-type button
+        const editors = document.querySelectorAll('.ql-editor, [contenteditable="true"]');
+        for (const ed of editors) {
+          let el = ed.parentElement;
+          for (let i = 0; i < 10 && el; i++) {
+            const btns = [...el.querySelectorAll('button')];
+            for (const btn of btns) {
+              const label = (btn.innerText || btn.getAttribute('aria-label') || '').toLowerCase();
+              if (label.includes('comment') || label.includes('post') || label.includes('submit')) {
+                btn.click();
+                return label;
+              }
+            }
+            el = el.parentElement;
+          }
+        }
+        return null;
+      });
+      if (found) {
+        console.log(`    ✓ Clicked nearby button: "${found}"`);
+        submitted = true;
+      }
+    }
+
+    // Final fallback: plain Enter (NOT Ctrl+Enter which adds newline)
+    if (!submitted) {
+      console.log('    ⚠️  No submit button found — pressing Enter as last resort');
+      await commentBox.click();
+      await page.waitForTimeout(200);
+      await page.keyboard.press('Enter');
+    }
+
+    // Wait for LinkedIn to process the submission
+    await page.waitForTimeout(3500);
 
     // ── 6. Check for LinkedIn error dialogs ──
     const errorDismissed = await page.evaluate(() => {
-      // Look for any error/alert dialog and dismiss it
       const dialogs = [
         ...document.querySelectorAll('[role="alertdialog"]'),
         ...document.querySelectorAll('[role="dialog"]'),
       ];
       for (const d of dialogs) {
         const txt = d.innerText || '';
-        if (txt.toLowerCase().includes('error') || txt.toLowerCase().includes('unable')
-          || txt.toLowerCase().includes('something went wrong')) {
-          // Try to find and click a dismiss/close button
+        if (
+          txt.toLowerCase().includes('error') ||
+          txt.toLowerCase().includes('unable') ||
+          txt.toLowerCase().includes('something went wrong')
+        ) {
           const btn = d.querySelector('button');
           if (btn) btn.click();
-          return true; // error was detected
+          return true;
         }
       }
       return false;
     });
 
     if (errorDismissed) {
-      console.log('    ⚠️  LinkedIn showed an error dialog — retrying with Enter key');
-      await commentBox.click();
-      await page.keyboard.press('Enter');
-      await page.waitForTimeout(3000);
+      console.log('    ⚠️  LinkedIn showed an error dialog after submission');
     }
 
     // ── 7. Verify ──
@@ -175,8 +240,14 @@ async function postComment(page, postUrl, commentText) {
       return true;
     }
 
-    // Comment posted but might still be loading — treat as success
-    return true;
+    // The page might not have refreshed yet — still treat as success
+    // if we successfully clicked a submit button
+    if (submitted) {
+      console.log('    ✓ Submit button clicked (verification pending page refresh)');
+      return true;
+    }
+
+    return false;
 
   } catch (err) {
     const msg = err.message || '';
