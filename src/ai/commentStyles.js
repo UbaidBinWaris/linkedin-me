@@ -32,11 +32,11 @@ Think like an engineer reviewing a technical decision: what are the edge cases? 
   },
   {
     id:          'question',
-    label:       'Thoughtful Question',
-    instruction: `Ask ONE specific, curious question that shows you read and thought about the post.
-The question should signal expertise — not "what do you think?" but something that opens a real thread.
-Example: "Have you found [specific aspect] changes at [specific scale]?"
-1 sentence. Genuine curiosity, not rhetorical.`,
+    label:       'Seeking Clarification',
+    instruction: `ONLY ask a question if the post contains incomplete/mismatched info, or introduces new tech needing explanation.
+If it does, ask ONE specific, curious question that shows you read and thought about it.
+If not, just provide a simple, insightful reaction.
+1-2 sentences. Genuine curiosity, not rhetorical.`,
   },
   {
     id:          'parallel',
@@ -57,24 +57,58 @@ Example: "Shipped something similar last [year/quarter] — the real challenge w
 ];
 
 // ─────────────────────────────────────────────────────────────────
-//  STYLE MEMORY — tracks last 3 styles used this session
+//  COMMENT TYPES (Weight Distribution)
+// ─────────────────────────────────────────────────────────────────
+
+const COMMENT_TYPES = [
+  { id: 'simple_reaction', weight: 25, label: 'Simple Reaction' },
+  { id: 'agreement',       weight: 20, label: 'Agreement' },
+  { id: 'micro_insight',   weight: 20, label: 'Micro Insight' },
+  { id: 'mini_story',      weight: 10, label: 'Mini Story' },
+  { id: 'curious_question',weight: 10, label: 'Curious Question' },
+  { id: 'builder_feedback',weight: 10, label: 'Builder Feedback' },
+  { id: 'supportive',      weight: 5,  label: 'Supportive' },
+  { id: 'celebratory',     weight: 5,  label: 'Celebratory' }
+];
+
+function pickRandomType() {
+  const totalWeight = COMMENT_TYPES.reduce((sum, t) => sum + t.weight, 0);
+  let random = Math.floor(Math.random() * totalWeight);
+  
+  for (const type of COMMENT_TYPES) {
+    if (random < type.weight) return type;
+    random -= type.weight;
+  }
+  return COMMENT_TYPES[0]; // Fallback
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  STYLE MEMORY — tracks last 5 styles used this session
 // ─────────────────────────────────────────────────────────────────
 
 const recentStyleIds = [];  // persists in memory per process run
 
 /**
- * Picks a random style, avoiding the last 3 used ones (if pool is large enough).
+ * Picks a random style, avoiding the last 5 used ones (if pool is large enough).
+ * Also randomizes pick probability implicitly instead of pure uniform distribution.
  * @returns {{ id, label, instruction }}
  */
 function pickRandomStyle() {
   const available = COMMENT_STYLES.filter((s) => !recentStyleIds.includes(s.id));
   const pool = available.length > 0 ? available : COMMENT_STYLES;
 
-  const picked = pool[Math.floor(Math.random() * pool.length)];
+  // Randomize probabilities instead of uniform math.floor
+  const weightedPool = pool.map(style => ({
+    style,
+    randWeight: Math.random() // dynamic randomized weight per run
+  }));
+  weightedPool.sort((a, b) => b.randWeight - a.randWeight);
 
-  // Remember this style; keep at most 3
+  const picked = weightedPool[0].style;
+
+  // Remember this style; keep at most 5 interactions
   recentStyleIds.push(picked.id);
-  if (recentStyleIds.length > 3) recentStyleIds.shift();
+  if (recentStyleIds.length > 5) recentStyleIds.shift();
 
   return picked;
 }
@@ -86,4 +120,10 @@ function getStyleMemory() {
   return [...recentStyleIds];
 }
 
-module.exports = { COMMENT_STYLES, pickRandomStyle, getStyleMemory };
+module.exports = { 
+  COMMENT_STYLES, 
+  COMMENT_TYPES, 
+  pickRandomStyle, 
+  pickRandomType, 
+  getStyleMemory 
+};
