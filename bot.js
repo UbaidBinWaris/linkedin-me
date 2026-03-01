@@ -24,7 +24,8 @@ const path     = require('path');
 const fs       = require('fs');
 
 const { createSession }         = require('./src/browser/session');
-const { findOneInterestingPost } = require('./src/linkedin/feed');
+const { getFeedPostsBatch, parseEngagement } = require('./src/linkedin/feed');
+const { shouldSkip, compositeScore } = require('./src/linkedin/filters');
 const { postComment }            = require('./src/linkedin/commenter');
 const { generateComment }        = require('./src/ai/gemini');
 const { pickRandomStyle, getStyleMemory } = require('./src/ai/commentStyles');
@@ -149,99 +150,161 @@ async function main() {
   }
 
   try {
-    // ── Step 5: Find best post ────────────────────────────────────
-    logStep(5, 'Finding best post via composite scoring');
+    // ── Step 5: Continuous Evaluation Loop ──────────────────────────
+    const MAX_RUNTIME_MS = 10 * 60 * 1000;
+    const startTime = Date.now();
+    const MAX_COMMENTS = config.bot.maxCommentsPerRun || 3;
+    let commentsMade = 0;
+
+    logStep(5, `Starting Continuous Engagement Loop (Max ${MAX_COMMENTS} comments, 10 min limit)`);
+    log(`Threshold: SCORE >= ${config.bot.minInterestScore}`);
     log('Filters active:');
     log('  • Skip OTW / job-seeking authors');
     log('  • Skip students, interns, freshers');
     log('  • Skip job advertisement posts');
-    log('  • Skip grief / tragedy posts (empathy should be human)');
+    log('  • Skip grief / tragedy posts');
     log('  • Skip authors commented on in the last 7 days');
-    log('  • Composite rank: 40% content + 25% engagement + 15% seniority + 10% niche + 10% recency');
 
-    const post = await findOneInterestingPost(page, commentedUrls, recentAuthors);
+    // track seen across batches so we don't evaluate same posts
+    const runSeenUrls = new Set();
+    const runSeenTexts = new Set();
 
-    if (!post) {
-      warn('No suitable post found on the current feed.');
-      warn('Tip: Scroll LinkedIn manually briefly, then re-run.');
-      warn('Or: node debug-feed.js — to inspect the live DOM.');
-      await waitForEnter('\nPress ENTER to close the browser and exit...\n');
-      await browser.close();
-      process.exit(0);
-    }
-
-    // ── Step 6: Pick comment style ────────────────────────────────
-    logStep(6, 'Picking comment style');
-    const style = pickRandomStyle();
-    success(`Style: "${style.label}" (ID: ${style.id})`);
-    log(`Style memory (last 3): ${getStyleMemory().join(' → ')}`);
-
-    // ── Step 7: Generate comment + AI reasoning ───────────────────
-    logStep(7, 'Generating comment with AI reasoning');
-    await delay(2000, 4000);
-
-    const result = await generateComment(post.postText, post.authorName, style);
-
-    log(`AI interest score: ${result.interestScore}/100`);
-    log(`Why interesting:   ${result.whyInteresting}`);
-    log(`Best angle:        ${result.bestAngle}`);
-    console.log('');
-    console.log(chalk.bold.white('  Generated comment:'));
-    console.log(chalk.italic(`  "${result.comment}"`));
-    console.log('');
-
-    if (!result.comment || result.comment.length < 10) {
-      warn('AI returned an invalid comment. Exiting.');
-      await waitForEnter('\nPress ENTER to close...\n');
-      await browser.close();
-      process.exit(1);
-    }
-
-    // ── Step 8: Reading pause (proportional to post length) ───────
-    logStep(8, 'Simulating reading time');
-    const words = post.postText.split(/\s+/).length;
-    const pauseMs = Math.round(Math.min(12, Math.max(4, words / 40)) * 1000);
-    log(`Post has ~${words} words — pausing ${(pauseMs / 1000).toFixed(1)}s (reading simulation)`);
-    await page.goto(post.postUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await readingPause(post.postText);
-
-    // ── Step 9: Micro-behavior — scroll-past (20% of runs) ────────
-    logStep(9, 'Micro-behavior check');
-    if (Math.random() < 0.20) {
-      log('Scroll-past behavior (20% run) — scrolling through post without commenting yet...');
-      for (let i = 0; i < 3; i++) {
-        await page.evaluate(() => window.scrollBy(0, 400 + Math.random() * 300));
-        await delay(800, 1800);
+    while (commentsMade < MAX_COMMENTS && (Date.now() - startTime) < MAX_RUNTIME_MS) {
+      log(`\n⏳ Time elapsed: ${Math.round((Date.now() - startTime) / 1000 / 60)} min / 10 min limit. Comments: ${commentsMade}/${MAX_COMMENTS}`);
+      log("Scrolling feed and collecting batch of posts...");
+      
+      const postsBatch = await getFeedPostsBatch(page, 5);
+      
+      if (!postsBatch || postsBatch.length === 0) {
+        warn('No posts found in this batch. Trying again in 5s...');
+        await delay(5000, 8000);
+        continue;
       }
-      await delay(2000, 4000);
-      log('Now going back to comment...');
-    } else {
-      success('No scroll-past this run.');
+      
+      log(`Found ${postsBatch.length} posts in batch. Evaluating...`);
+      
+      // evaluate posts sequentially
+      for (let i = 0; i < postsBatch.length; i++) {
+        if (commentsMade >= MAX_COMMENTS || (Date.now() - startTime) > MAX_RUNTIME_MS) break;
+        
+        const post = postsBatch[i];
+        if (!post.postUrl) continue;
+        
+        // dedup within run
+        if (runSeenUrls.has(post.postUrl)) continue;
+        runSeenUrls.add(post.postUrl);
+        
+        const textKey = post.postText.slice(0, 60);
+        if (runSeenTexts.has(textKey)) continue;
+        runSeenTexts.add(textKey);
+
+        // dedup globally
+        if (commentedUrls.has(post.postUrl)) continue;
+        
+        // hard filters
+        const { skip, reason } = shouldSkip(post.authorName, post.authorHeadline, post.postText);
+        if (skip) {
+          continue;
+        }
+        
+        // 7-day cooldown
+        if (recentAuthors.has((post.authorName || '').toLowerCase())) {
+          continue;
+        }
+        
+        // Engagement and Score
+        const { reactionCount, commentCount } = parseEngagement(post.cardText || '');
+        const { total: score, breakdown } = compositeScore({
+          postText:       post.postText,
+          authorHeadline: post.authorHeadline,
+          reactionCount,
+          commentCount,
+          positionIndex:  i,
+          totalPosts:     postsBatch.length,
+          isConnection:   post.isConnection,
+          postFormat:     post.postFormat,
+          commentsData:   post.commentsData,
+          authorReplied:  post.authorReplied,
+          postAge:        post.postAge
+        });
+        
+        const nameStr = (post.authorName || 'Unknown').slice(0, 20).padEnd(20);
+        const engStr  = reactionCount ? `${reactionCount}👍 ${commentCount}💬` : 'no data';
+        const isGood  = score >= config.bot.minInterestScore;
+        const mark    = isGood ? '[✓]' : '[✗]';
+        
+        log(`  ${mark} ${nameStr} | score:${score} (H:${breakdown.heuristic} E:${breakdown.engagement} V:${breakdown.visibility}) | ${engStr}`);
+        
+        if (isGood) {
+          log(`\n🏆 Found target post by "${post.authorName}" (Score: ${score})`);
+          log(`   Breakdown: H${breakdown.heuristic} E${breakdown.engagement} V${breakdown.visibility} S${breakdown.seniority} N${breakdown.niche} R${breakdown.recency}`);
+          
+          // Step 6: Style
+          logStep(6, 'Picking comment style');
+          const style = pickRandomStyle();
+          success(`Style: "${style.label}"`);
+          
+          // Step 7: Generate
+          logStep(7, 'Generating comment with AI...');
+          await delay(2000, 4000);
+          const result = await generateComment(post.postText, post.authorName, style);
+          
+          log(`   AI Target Angle: ${result.bestAngle}`);
+          console.log(chalk.italic(`   "${result.comment}"\n`));
+          
+          if (!result.comment || result.comment.length < 10) {
+            warn('   [!] AI failed to generate valid comment. Skipping...');
+            continue;
+          }
+          
+          // Step 8: Read pause
+          logStep(8, 'Simulating reading time');
+          const words = post.postText.split(/\s+/).length;
+          const pauseMs = Math.round(Math.min(12, Math.max(4, words / 40)) * 1000);
+          log(`   Post has ~${words} words — pausing ${(pauseMs/1000).toFixed(1)}s...`);
+          
+          try {
+            await page.goto(post.postUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            await new Promise(r => setTimeout(r, pauseMs));
+            
+            // Micro-behavior scroll check
+            if (Math.random() < 0.20) {
+              log('   Scroll-past behavior... scrolling before commenting...');
+              for (let j = 0; j < 3; j++) {
+                await page.evaluate(() => window.scrollBy(0, 400 + Math.random() * 300));
+                await delay(800, 1800);
+              }
+              await delay(2000, 4000);
+            }
+
+            // Step 10: Post comment
+            logStep(10, 'Posting comment on LinkedIn');
+            const posted = await postComment(page, post.postUrl, result.comment);
+            
+            if (posted) {
+              success(`   Posted! Saved to CSV.`);
+              await writeCommentedPost(post.postUrl, post.authorName, result.comment);
+              commentedUrls.add(post.postUrl);
+              recentAuthors.add((post.authorName || '').toLowerCase());
+              commentsMade++;
+            } else {
+              warn('   [!] Failed to post comment on page.');
+            }
+          } catch(e) {
+            warn(`   [!] Page interaction error: ${e.message}`);
+          }
+          
+          log(`   Taking a break before continuing the hunt...`);
+          await delay(12000, 25000);
+          
+          // Navigate back to feed
+          await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await delay(3000, 5000);
+        }
+      }
     }
 
-    // ── Step 10: Post comment ──────────────────────────────────────
-    logStep(10, 'Posting comment on LinkedIn');
-    const posted = await postComment(page, post.postUrl, result.comment);
-
-    if (!posted) {
-      warn('Commenting failed — check the browser and try again.');
-      await waitForEnter('\nPress ENTER to close the browser...\n');
-      await browser.close();
-      process.exit(1);
-    }
-
-    // ── Step 11: Save to CSV ──────────────────────────────────────
-    logStep(11, 'Saving to CSV');
-    await writeCommentedPost(post.postUrl, post.authorName, result.comment);
-    success(`Saved: ${post.authorName} → ${post.postUrl}`);
-
-    // ── Step 12: Done — wait for user ────────────────────────────
-    logStep(12, 'Done');
-    console.log('');
-    success(`Comment posted as style: "${style.label}"`);
-    success(`AI reasoning: ${result.whyInteresting}`);
-    success(`Composite score: ${post.compositeScore}/100`);
-    console.log('');
+    logStep('END', `Finished bot run. Comments made: ${commentsMade}/${MAX_COMMENTS}`);
     log('The browser is still open. Browse LinkedIn freely.');
     console.log('');
 

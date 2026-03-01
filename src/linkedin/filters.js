@@ -17,6 +17,22 @@
 //  SKIP SIGNALS — Authors / posts to completely ignore
 // ─────────────────────────────────────────────────────────────────
 
+const AI_SPAM_SIGNALS = [
+  'in today’s fast paced world', 'in todays fast paced world', 'in today\'s fast-paced world',
+  'as we navigate', 'it is important to', 'here are 5 lessons', 'here are 3 lessons',
+  'delve into', 'let\'s dive in'
+];
+
+const ENGAGEMENT_POD_SIGNALS = [
+  'nice one bro', 'dm sent', 'check inbox', 'interested', 'great post',
+  'thanks for sharing', 'commenting for reach'
+];
+
+const STORY_ARC_SIGNALS = [
+  'started', 'failed', 'learned', 'realized', 'after 3 years', 'in 2020',
+  'in 2021', 'in 2022', 'we almost', 'i almost'
+];
+
 const OTW_SIGNALS = [
   'open to work', 'open to opportunities', '#opentowork', 'open for work',
   '#openforwork', 'actively seeking', 'actively looking', 'available for hire',
@@ -164,9 +180,9 @@ function shouldSkip(authorName = '', authorHeadline = '', postText = '') {
 
 /**
  * Heuristic content score — 0-100
- * Keyword matching from GOOD/BAD lists.
+ * Keyword matching from GOOD/BAD lists, story arcs, and penalties.
  */
-function calcHeuristicScore(postText = '') {
+function calcHeuristicScore(postText = '', commentsData = []) {
   const t = lc('', '', postText);
   if (postText.length < 100) return 0;
 
@@ -177,6 +193,22 @@ function calcHeuristicScore(postText = '') {
 
   for (const kw of GOOD_SIGNALS) if (t.includes(kw)) score += 5;
   for (const kw of BAD_SIGNALS)  if (t.includes(kw)) score -= 10;
+  
+  // Story Arc Boost
+  let storyWordCount = 0;
+  for (const kw of STORY_ARC_SIGNALS) if (t.includes(kw)) storyWordCount++;
+  if (storyWordCount >= 2) score += 20;
+
+  // AI Content Penalty
+  for (const kw of AI_SPAM_SIGNALS) if (t.includes(kw)) score -= 20;
+
+  // Engagement Pod Penalty (Check comments)
+  if (commentsData && commentsData.length > 0) {
+    let podHits = 0;
+    const commentsText = commentsData.join(' ').toLowerCase();
+    for (const kw of ENGAGEMENT_POD_SIGNALS) if (commentsText.includes(kw)) podHits++;
+    if (podHits >= 2) score -= 30; // Heavy penalty if obvious pod thread
+  }
 
   return clamp(score, 0, 100);
 }
@@ -202,15 +234,26 @@ function calcEngagementScore(reactionCount = 0, commentCount = 0) {
 }
 
 /**
- * Seniority score — 0-100
+ * Seniority score — 0-100 (Capped at 80 to prevent automatic dominance)
  * Based on keywords in authorHeadline.
  */
 function calcSeniorityScore(authorHeadline = '') {
   const hl = authorHeadline.toLowerCase();
+  
+  // Follower Proxy Boosts (Creator, Newsletter, Investor, Angel)
+  let proxyBoost = 0;
+  if (hl.includes('creator') || hl.includes('newsletter')) proxyBoost += 15;
+  if (hl.includes('angel') || hl.includes('investor')) proxyBoost += 10;
+
+  let rawScore = 20; // unknown headline = neutral
   for (const [kw, pts] of SENIORITY_SIGNALS) {
-    if (hl.includes(kw)) return clamp(pts * 4, 0, 100);
+    if (hl.includes(kw)) {
+      rawScore = pts * 4;
+      break; // take highest matching (array ordered descending)
+    }
   }
-  return 20; // unknown headline = neutral
+  
+  return clamp(Math.min(rawScore, 80) + proxyBoost, 0, 100);
 }
 
 /**
@@ -232,16 +275,39 @@ function calcNicheScore(postText = '') {
  * @param {number} positionIndex - 0 = first post found (most recent)
  * @param {number} totalPosts - total posts found
  */
-function calcRecencyScore(positionIndex = 0, totalPosts = 10) {
-  if (totalPosts === 0) return 50;
-  const ratio = 1 - (positionIndex / totalPosts);
-  return clamp(ratio * 100, 0, 100);
+function calcRecencyScore(positionIndex = 0, totalPosts = 10, postAge = '') {
+  let score = 50;
+  if (totalPosts > 0) {
+    const ratio = 1 - (positionIndex / totalPosts);
+    score = ratio * 100;
+  }
+  
+  // Extra boost if "1h" or "minutes" is detected in exact postAge string
+  const lowerAge = (postAge || '').toLowerCase();
+  if (lowerAge.includes('m •') || lowerAge.includes('1h •')) {
+    score += 20;
+  }
+  
+  return clamp(score, 0, 100);
+}
+
+/**
+ * Comment Visibility Potential Score — 0-100
+ * Measures how likely your comment is to be seen.
+ */
+function calcCommentVisibilityScore(commentCount = 0) {
+  if (commentCount <= 5) return 90;
+  if (commentCount <= 20) return 100;
+  if (commentCount <= 50) return 75;
+  if (commentCount <= 100) return 50;
+  if (commentCount <= 200) return 25;
+  return 10;
 }
 
 /**
  * Master composite scorer.
  *
- * @param {{ postText, authorHeadline, reactionCount, commentCount, positionIndex, totalPosts }} post
+ * @param {object} post metadata object
  * @returns {{ total: number, breakdown: object, shouldComment: boolean }}
  */
 function compositeScore(post) {
@@ -252,16 +318,69 @@ function compositeScore(post) {
     commentCount   = 0,
     positionIndex  = 0,
     totalPosts     = 10,
+    isConnection   = false,
+    postFormat     = 'text',
+    commentsData   = [],
+    authorReplied  = false,
+    postAge        = '',
   } = post;
 
-  const heuristic  = calcHeuristicScore(postText);
-  const engagement = calcEngagementScore(reactionCount, commentCount);
+  let heuristic  = calcHeuristicScore(postText, commentsData);
+  let engagement = calcEngagementScore(reactionCount, commentCount);
   const seniority  = calcSeniorityScore(authorHeadline);
   const niche      = calcNicheScore(postText);
-  const recency    = calcRecencyScore(positionIndex, totalPosts);
+  let recency    = calcRecencyScore(positionIndex, totalPosts, postAge);
+  const visibility = calcCommentVisibilityScore(commentCount);
 
-  const total = (heuristic  * 0.40)
-              + (engagement * 0.25)
+  // Apply contextual modifiers to heuristic score
+  
+  // Early Traction Boost
+  if (reactionCount >= 15 && reactionCount <= 150 && commentCount <= 40) {
+    heuristic += 15;
+  }
+  
+  // Network Proximity Boost
+  if (isConnection) {
+    heuristic += 15;
+  }
+  
+  // Post Format Classification
+  if (postFormat === 'text') heuristic += 10;
+  if (postFormat === 'image') heuristic += 5;
+  if (postFormat === 'poll') heuristic -= 10;
+  
+  // Comment Depth Opportunity
+  if (commentsData.length > 0) {
+    const avgLen = commentsData.reduce((acc, c) => acc + c.length, 0) / commentsData.length;
+    if (avgLen < 50) heuristic += 20; // Shallow thread, good chance to stand out
+  }
+  
+  // Author Reply Probability
+  if (authorReplied) {
+    heuristic += 20;
+  }
+  
+  // Time adjustments (we don't know local time precisely, but postAge helps)
+  // We boost if momentum is high
+  const lowerAge = postAge.toLowerCase();
+  if ((lowerAge.includes('m •') || lowerAge.includes('1h •')) && reactionCount >= 50) {
+    engagement += 20; 
+  }
+
+  // Ensure bounds
+  heuristic = clamp(heuristic, 0, 100);
+  engagement = clamp(engagement, 0, 100);
+
+  // New Weighted Math Formula (Strategically aligned for ROI)
+  //  score = (heuristicScore  * 0.35)
+  //        + (engagementScore * 0.15)
+  //        + (visibilityScore * 0.15)
+  //        + (seniorityScore  * 0.15)
+  //        + (nicheScore      * 0.10)
+  //        + (recencyScore    * 0.10)
+  const total = (heuristic  * 0.35)
+              + (engagement * 0.15)
+              + (visibility * 0.15)
               + (seniority  * 0.15)
               + (niche      * 0.10)
               + (recency    * 0.10);
@@ -274,6 +393,7 @@ function compositeScore(post) {
       seniority:  Math.round(seniority),
       niche:      Math.round(niche),
       recency:    Math.round(recency),
+      visibility: Math.round(visibility),
     },
     shouldComment: total >= 30,
   };
@@ -287,6 +407,7 @@ module.exports = {
   calcEngagementScore,
   calcSeniorityScore,
   calcNicheScore,
+  calcCommentVisibilityScore,
   // Signal lists (for extension)
   OTW_SIGNALS, STUDENT_SIGNALS, JOB_POST_SIGNALS,
   SENTIMENT_SKIP_SIGNALS, NICHE_SIGNALS, SENIORITY_SIGNALS,

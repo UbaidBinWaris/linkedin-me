@@ -138,8 +138,22 @@ function parseAuthorFromLines(lines) {
   }
 
   const postText = lines.slice(bodyStart).join(' ').trim();
-  return { authorName: authorName || 'Unknown', authorHeadline, postText };
+  
+  // connection extraction (heuristically from headline or subtitle)
+  const isConnection = authorHeadline.toLowerCase().includes('1st') || 
+                       lines.slice(0, 3).some(l => l.toLowerCase().includes('1st'));
+
+  return { 
+    authorName: authorName || 'Unknown', 
+    authorHeadline, 
+    postText,
+    isConnection 
+  };
 }
+
+// ─────────────────────────────────────────────────────────────────
+// The global metrics extractor was removed since it relies on DOM objects
+// that cannot cross the evaluate boundary
 
 // ─────────────────────────────────────────────────────────────────
 //  STRATEGY A+B — Link Walk on /posts/ and /feed/update/ anchors
@@ -147,6 +161,49 @@ function parseAuthorFromLines(lines) {
 
 async function collectByLinkWalk(page) {
   return page.evaluate(() => {
+    function isRealAuthorName(name = '') {
+      if (!name || name.length < 3 || name.length > 80) return false;
+      const lower = name.toLowerCase();
+      const fakePatterns = [
+        /^feed post/i, /^linkedin member/i, /^unknown/i, /^post number/i,
+        /^sponsored/i, /^promoted/i, /^\d+$/, /^see more/i, /^following/i,
+        /^follow$/i, /^connect$/i, /^message$/i, /^like$/i, /^comment$/i,
+        /^share$/i, /^send$/i,
+      ];
+      if (fakePatterns.some((re) => re.test(lower))) return false;
+      if (!/[a-zA-Z]/.test(name)) return false;
+      return true;
+    }
+
+    function parseAuthorFromLines(lines) {
+      let authorName = '';
+      let authorHeadline = '';
+      let bodyStart = 0;
+      for (let i = 0; i < Math.min(lines.length, 15); i++) {
+        const ln = lines[i];
+        const wc = ln.split(/\s+/).filter(Boolean).length;
+        if (!ln || ln.length > 80 || ln.includes('http')) {
+          if (authorName) break;
+          continue;
+        }
+        if (!authorName) {
+          if (wc >= 1 && wc <= 8 && isRealAuthorName(ln)) {
+            authorName = ln;
+            bodyStart = i + 1;
+          }
+        } else if (!authorHeadline && wc <= 14) {
+          authorHeadline = ln;
+          bodyStart = i + 1;
+        } else {
+          break;
+        }
+      }
+      const postText = lines.slice(bodyStart).join(' ').trim();
+      const isConnection = authorHeadline.toLowerCase().includes('1st') || 
+                           lines.slice(0, 3).some(l => l.toLowerCase().includes('1st'));
+      return { authorName: authorName || 'Unknown', authorHeadline, postText, isConnection };
+    }
+
     const results  = [];
     const seenUrls = new Set();
 
@@ -178,19 +235,53 @@ async function collectByLinkWalk(page) {
         if (t.length >= 150 && t.length <= 30000) { cardText = t; break; }
         el = el.parentElement;
       }
-      if (!cardText || cardText.length < 120) continue;
+      if (!cardText || cardText.length < 120 || !el) continue;
 
-      results.push({ postUrl: url, cardText });
+      const lines = cardText.split('\n').map((l) => l.trim()).filter(Boolean);
+      const authorInfo = parseAuthorFromLines(lines);
+
+      // Extract metrics
+      let postFormat = 'text';
+      if (el.querySelector('.update-components-poll')) postFormat = 'poll';
+      else if (el.querySelector('.update-components-document')) postFormat = 'carousel';
+      else if (el.querySelector('video') || el.querySelector('.update-components-video')) postFormat = 'video';
+      else if (el.querySelector('img.update-components-image__image')) postFormat = 'image';
+
+      let commentsData = [];
+      let authorReplied = false;
+      const commentElems = el.querySelectorAll('.comments-comment-item');
+      for (let i = 0; i < Math.min(commentElems.length, 3); i++) {
+        const cEl = commentElems[i];
+        const textNode = cEl.querySelector('.comments-comment-item__main-content');
+        const authorNode = cEl.querySelector('.comments-post-meta__name-text');
+        if (textNode) commentsData.push(textNode.innerText.trim());
+        if (authorNode && authorInfo.authorName) {
+          if (authorNode.innerText.trim().toLowerCase() === authorInfo.authorName.toLowerCase()) {
+            authorReplied = true;
+          }
+        }
+      }
+
+      let postAge = '';
+      const metaNode = el.querySelector('.update-components-actor__sub-description');
+      if (metaNode) postAge = metaNode.innerText.trim();
+
+      results.push({ 
+        postUrl: url, 
+        cardText,
+        authorName: authorInfo.authorName,
+        authorHeadline: authorInfo.authorHeadline,
+        postText: authorInfo.postText,
+        isConnection: authorInfo.isConnection,
+        postFormat,
+        commentsData,
+        authorReplied,
+        postAge
+      });
     }
 
     return results;
-  }).then((raw) =>
-    raw.map(({ postUrl, cardText }) => {
-      const lines = cardText.split('\n').map((l) => l.trim()).filter(Boolean);
-      const { authorName, authorHeadline, postText } = parseAuthorFromLines(lines);
-      return { postUrl, authorName, authorHeadline, postText, cardText };
-    }).filter((p) => p.postText.length >= 80)
-  );
+  }).then((raw) => raw.filter((p) => p.postText.length >= 80));
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -199,6 +290,49 @@ async function collectByLinkWalk(page) {
 
 async function collectByDataUrn(page) {
   return page.evaluate(() => {
+    function isRealAuthorName(name = '') {
+      if (!name || name.length < 3 || name.length > 80) return false;
+      const lower = name.toLowerCase();
+      const fakePatterns = [
+        /^feed post/i, /^linkedin member/i, /^unknown/i, /^post number/i,
+        /^sponsored/i, /^promoted/i, /^\d+$/, /^see more/i, /^following/i,
+        /^follow$/i, /^connect$/i, /^message$/i, /^like$/i, /^comment$/i,
+        /^share$/i, /^send$/i,
+      ];
+      if (fakePatterns.some((re) => re.test(lower))) return false;
+      if (!/[a-zA-Z]/.test(name)) return false;
+      return true;
+    }
+
+    function parseAuthorFromLines(lines) {
+      let authorName = '';
+      let authorHeadline = '';
+      let bodyStart = 0;
+      for (let i = 0; i < Math.min(lines.length, 15); i++) {
+        const ln = lines[i];
+        const wc = ln.split(/\s+/).filter(Boolean).length;
+        if (!ln || ln.length > 80 || ln.includes('http')) {
+          if (authorName) break;
+          continue;
+        }
+        if (!authorName) {
+          if (wc >= 1 && wc <= 8 && isRealAuthorName(ln)) {
+            authorName = ln;
+            bodyStart = i + 1;
+          }
+        } else if (!authorHeadline && wc <= 14) {
+          authorHeadline = ln;
+          bodyStart = i + 1;
+        } else {
+          break;
+        }
+      }
+      const postText = lines.slice(bodyStart).join(' ').trim();
+      const isConnection = authorHeadline.toLowerCase().includes('1st') || 
+                           lines.slice(0, 3).some(l => l.toLowerCase().includes('1st'));
+      return { authorName: authorName || 'Unknown', authorHeadline, postText, isConnection };
+    }
+
     const results = [];
     const seen    = new Set();
     const elems   = document.querySelectorAll('[data-urn*="activity"],[data-id*="activity"],[data-entity-urn]');
@@ -215,16 +349,50 @@ async function collectByDataUrn(page) {
       const cardText = (el.innerText || '').trim();
       if (cardText.length < 150) continue;
 
-      results.push({ postUrl, cardText });
+      const lines = cardText.split('\n').map((l) => l.trim()).filter(Boolean);
+      const authorInfo = parseAuthorFromLines(lines);
+
+      // Extract metrics
+      let postFormat = 'text';
+      if (el.querySelector('.update-components-poll')) postFormat = 'poll';
+      else if (el.querySelector('.update-components-document')) postFormat = 'carousel';
+      else if (el.querySelector('video') || el.querySelector('.update-components-video')) postFormat = 'video';
+      else if (el.querySelector('img.update-components-image__image')) postFormat = 'image';
+
+      let commentsData = [];
+      let authorReplied = false;
+      const commentElems = el.querySelectorAll('.comments-comment-item');
+      for (let i = 0; i < Math.min(commentElems.length, 3); i++) {
+        const cEl = commentElems[i];
+        const textNode = cEl.querySelector('.comments-comment-item__main-content');
+        const authorNode = cEl.querySelector('.comments-post-meta__name-text');
+        if (textNode) commentsData.push(textNode.innerText.trim());
+        if (authorNode && authorInfo.authorName) {
+          if (authorNode.innerText.trim().toLowerCase() === authorInfo.authorName.toLowerCase()) {
+            authorReplied = true;
+          }
+        }
+      }
+
+      let postAge = '';
+      const metaNode = el.querySelector('.update-components-actor__sub-description');
+      if (metaNode) postAge = metaNode.innerText.trim();
+
+      results.push({ 
+        postUrl, 
+        cardText,
+        authorName: authorInfo.authorName,
+        authorHeadline: authorInfo.authorHeadline,
+        postText: authorInfo.postText,
+        isConnection: authorInfo.isConnection,
+        postFormat,
+        commentsData,
+        authorReplied,
+        postAge
+      });
     }
     return results;
-  }).then((raw) =>
-    raw.map(({ postUrl, cardText }) => {
-      const lines = cardText.split('\n').map((l) => l.trim()).filter(Boolean);
-      const { authorName, authorHeadline, postText } = parseAuthorFromLines(lines);
-      return { postUrl, authorName, authorHeadline, postText, cardText };
-    }).filter((p) => p.postText.length >= 80)
-  );
+  }).then((raw) => raw.filter((p) => p.postText.length >= 80));
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -251,8 +419,12 @@ async function collectByBodyText(page) {
     seen.add(key);
 
     const lines       = trimmed.split('\n').map((l) => l.trim()).filter(Boolean);
-    const { authorName, authorHeadline, postText } = parseAuthorFromLines(lines);
-    results.push({ postUrl: null, authorName, authorHeadline, postText, cardText: trimmed });
+    const { authorName, authorHeadline, postText, isConnection } = parseAuthorFromLines(lines);
+    // Body parse has no DOM element container so we default the metrics
+    results.push({ 
+      postUrl: null, authorName, authorHeadline, postText, cardText: trimmed, isConnection,
+      postFormat: 'text', commentsData: [], authorReplied: false, postAge: ''
+    });
   }
   return results;
 }
@@ -285,10 +457,10 @@ function dedup(posts) {
  *
  * @param {Page}    page
  * @param {Set}     commentedUrls  - Post URLs already commented on
- * @param {Set}     recentAuthors  - Author names engaged in last 7 days (lowercase)
+ * @param {Array<number>} thresholds     - Array of fallback thresholds to use (e.g. [80, 70, 60])
  * @returns {Promise<object|null>}
  */
-async function findOneInterestingPost(page, commentedUrls = new Set(), recentAuthors = new Set()) {
+async function findOneInterestingPost(page, commentedUrls = new Set(), recentAuthors = new Set(), thresholds = [80, 70, 60]) {
   await ensureOnFeed(page);
   await scrollFeed(page, 10);
 
@@ -369,26 +541,38 @@ async function findOneInterestingPost(page, commentedUrls = new Set(), recentAut
 
     const nameStr = (post.authorName || 'Unknown').slice(0, 28).padEnd(28);
     const engStr  = reactionCount ? `${reactionCount}👍 ${commentCount}💬` : 'no engagement data';
-    const mark    = shouldComment ? '[✓]' : '[✗]';
-    console.log(`  ${mark} ${nameStr} | score:${score} (H:${breakdown.heuristic} E:${breakdown.engagement} S:${breakdown.seniority} N:${breakdown.niche} R:${breakdown.recency}) | ${engStr}`);
+    const mark    = (score >= thresholds[thresholds.length - 1]) ? '[✓]' : '[✗]';
+    console.log(`  ${mark} ${nameStr} | score:${score} (H:${breakdown.heuristic} E:${breakdown.engagement} V:${breakdown.visibility} S:${breakdown.seniority} N:${breakdown.niche} R:${breakdown.recency}) | ${engStr}`);
 
-    if (shouldComment) {
+    if (score >= thresholds[thresholds.length - 1]) {
       candidates.push({ ...post, reactionCount, commentCount, compositeScore: score, breakdown });
     }
   }
 
   if (candidates.length === 0) {
-    console.log('\n  ⚠️  No posts met the composite score threshold (30/100).');
-    console.log('  → Lower MIN_INTEREST_SCORE or broaden NICHE_SIGNALS in filters.js');
+    console.log(`\n  ⚠️  No posts met the minimum composite score threshold (${thresholds[thresholds.length - 1]}/100).`);
+    console.log('  → Lower thresholds or broaden NICHE_SIGNALS in filters.js');
     return null;
   }
 
-  // Sort descending — pick the best
-  candidates.sort((a, b) => b.compositeScore - a.compositeScore);
-  const winner = candidates[0];
+  // Find the highest threshold that has at least one matching candidate
+  let activeThreshold = thresholds[thresholds.length - 1]; // default minimum
+  for (const t of thresholds) {
+    if (candidates.some(c => c.compositeScore >= t)) {
+      activeThreshold = t;
+      break;
+    }
+  }
+
+  console.log(`\n  Dynamic Threshold Active: >= ${activeThreshold}`);
+
+  // Filter candidates by active threshold and sort descending — pick the best
+  const validCandidates = candidates.filter(c => c.compositeScore >= activeThreshold);
+  validCandidates.sort((a, b) => b.compositeScore - a.compositeScore);
+  const winner = validCandidates[0];
 
   console.log(`\n  🏆 Best post: "${winner.authorName}" (composite: ${winner.compositeScore}/100)`);
-  console.log(`     Breakdown: H${winner.breakdown.heuristic} E${winner.breakdown.engagement} S${winner.breakdown.seniority} N${winner.breakdown.niche} R${winner.breakdown.recency}`);
+  console.log(`     Breakdown: H${winner.breakdown.heuristic} E${winner.breakdown.engagement} V${winner.breakdown.visibility} S${winner.breakdown.seniority} N${winner.breakdown.niche} R${winner.breakdown.recency}`);
 
   return winner;
 }
@@ -450,7 +634,49 @@ function parseAuthorFromLines(lines) {
   }
 
   const postText = lines.slice(bodyStart).join(' ').trim();
-  return { authorName: authorName || 'Unknown', authorHeadline, postText };
+  
+  const isConnection = authorHeadline.toLowerCase().includes('1st') || 
+                       lines.slice(0, 3).some(l => l.toLowerCase().includes('1st'));
+
+  return { 
+    authorName: authorName || 'Unknown', 
+    authorHeadline, 
+    postText,
+    isConnection 
+  };
 }
 
-module.exports = { findOneInterestingPost, scrapeProfilePosts };
+// ─────────────────────────────────────────────────────────────────
+//  BATCH EXTRACTOR FOR BOT ORCHESTRATOR
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Scrolls feed and returns all deduplicated candidates parsed.
+ * Does not score or filter (except basic lengths).
+ */
+async function getFeedPostsBatch(page, passes = 5) {
+  await ensureOnFeed(page);
+  await scrollFeed(page, passes);
+
+  let posts = [];
+  const strategies = [
+    { name: 'Link-walk (/posts/ + /feed/update/)', fn: () => collectByLinkWalk(page) },
+    { name: 'data-urn walk',                       fn: () => collectByDataUrn(page) },
+    { name: 'body.innerText parse',                fn: () => collectByBodyText(page) },
+  ];
+
+  for (const { name, fn } of strategies) {
+    try {
+      const found = await fn();
+      if (found.length > 0) {
+        posts = posts.concat(found);
+      }
+    } catch (e) {
+      // ignore strategy errors in batch
+    }
+  }
+
+  return dedup(posts);
+}
+
+module.exports = { findOneInterestingPost, scrapeProfilePosts, getFeedPostsBatch, parseEngagement };
