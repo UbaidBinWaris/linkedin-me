@@ -220,7 +220,7 @@ function calcHeuristicScore(postText = '', commentsData = []) {
  */
 function calcEngagementScore(reactionCount = 0, commentCount = 0) {
   // Too few = nobody cares; too many = spam cluster risk
-  if (reactionCount < 5)      return 10;  // very few reactions, still might be new
+  if (reactionCount < 5)      return 25;  // very few reactions, or failed to parse due to UI. Penalty reduced.
   if (reactionCount > 10000)  return 15;  // viral — avoid
   if (commentCount > 200)     return 10;  // too crowded
 

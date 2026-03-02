@@ -12,6 +12,7 @@
  */
 
 const { shouldSkip, compositeScore } = require('./filters');
+const { extractPostId } = require('../data/csv');
 
 // ─────────────────────────────────────────────────────────────────
 //  NAVIGATION
@@ -49,8 +50,6 @@ async function scrollFeed(page, passes = 10) {
     await page.evaluate((px) => window.scrollBy(0, px), amount);
     await page.waitForTimeout(700 + Math.floor(Math.random() * 600));
   }
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(1200);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -60,8 +59,8 @@ async function scrollFeed(page, passes = 10) {
 function parseEngagement(cardText = '') {
   let reactionCount = 0;
   let commentCount  = 0;
-  const reactionMatch = cardText.match(/([\d,\.]+\s*[Kk]?)\s+reactions?/i);
-  const commentMatch  = cardText.match(/([\d,\.]+\s*[Kk]?)\s+comments?/i);
+  const reactionMatch = cardText.match(/([\d,\.]+\s*[KkMm]?)\s*(?:reactions?|likes?)/i);
+  const commentMatch  = cardText.match(/([\d,\.]+\s*[KkMm]?)\s*comments?/i);
   if (reactionMatch) reactionCount = parseCount(reactionMatch[1]);
   if (commentMatch)  commentCount  = parseCount(commentMatch[1]);
   return { reactionCount, commentCount };
@@ -69,6 +68,7 @@ function parseEngagement(cardText = '') {
 
 function parseCount(str = '') {
   const s = str.replace(/,/g, '').trim().toUpperCase();
+  if (s.includes('M')) return Math.round(parseFloat(s) * 1000000);
   if (s.includes('K')) return Math.round(parseFloat(s) * 1000);
   return parseInt(s) || 0;
 }
@@ -266,6 +266,23 @@ async function collectByLinkWalk(page) {
       const metaNode = el.querySelector('.update-components-actor__sub-description');
       if (metaNode) postAge = metaNode.innerText.trim();
 
+      let profileUrl = '';
+      const authorLinks = el.querySelectorAll('a[href*="/in/"], a[href*="/company/"]');
+      for (const lnk of authorLinks) {
+        if (lnk.innerText && lnk.innerText.trim().toLowerCase().includes(authorInfo.authorName.toLowerCase())) {
+          profileUrl = lnk.getAttribute('href') || '';
+          break;
+        }
+      }
+      if (!profileUrl && authorLinks.length > 0) {
+        profileUrl = authorLinks[0].getAttribute('href') || '';
+      }
+      if (profileUrl && !profileUrl.startsWith('http')) {
+        profileUrl = 'https://www.linkedin.com' + profileUrl.split('?')[0];
+      } else if (profileUrl) {
+        profileUrl = profileUrl.split('?')[0];
+      }
+
       results.push({ 
         postUrl: url, 
         cardText,
@@ -276,7 +293,8 @@ async function collectByLinkWalk(page) {
         postFormat,
         commentsData,
         authorReplied,
-        postAge
+        postAge,
+        profileUrl
       });
     }
 
@@ -378,6 +396,23 @@ async function collectByDataUrn(page) {
       const metaNode = el.querySelector('.update-components-actor__sub-description');
       if (metaNode) postAge = metaNode.innerText.trim();
 
+      let profileUrl = '';
+      const authorLinks = el.querySelectorAll('a[href*="/in/"], a[href*="/company/"]');
+      for (const lnk of authorLinks) {
+        if (lnk.innerText && lnk.innerText.trim().toLowerCase().includes(authorInfo.authorName.toLowerCase())) {
+          profileUrl = lnk.getAttribute('href') || '';
+          break;
+        }
+      }
+      if (!profileUrl && authorLinks.length > 0) {
+        profileUrl = authorLinks[0].getAttribute('href') || '';
+      }
+      if (profileUrl && !profileUrl.startsWith('http')) {
+        profileUrl = 'https://www.linkedin.com' + profileUrl.split('?')[0];
+      } else if (profileUrl) {
+        profileUrl = profileUrl.split('?')[0];
+      }
+
       results.push({ 
         postUrl, 
         cardText,
@@ -388,7 +423,8 @@ async function collectByDataUrn(page) {
         postFormat,
         commentsData,
         authorReplied,
-        postAge
+        postAge,
+        profileUrl
       });
     }
     return results;
@@ -423,7 +459,7 @@ async function collectByBodyText(page) {
     // Body parse has no DOM element container so we default the metrics
     results.push({ 
       postUrl: null, authorName, authorHeadline, postText, cardText: trimmed, isConnection,
-      postFormat: 'text', commentsData: [], authorReplied: false, postAge: ''
+      postFormat: 'text', commentsData: [], authorReplied: false, postAge: '', profileUrl: ''
     });
   }
   return results;
@@ -441,8 +477,9 @@ function dedup(posts) {
     if (seenText.has(textKey)) return false;
     seenText.add(textKey);
     if (p.postUrl) {
-      if (seenUrls.has(p.postUrl)) return false;
-      seenUrls.add(p.postUrl);
+      const id = extractPostId(p.postUrl);
+      if (seenUrls.has(id)) return false;
+      seenUrls.add(id);
     }
     return true;
   });
@@ -508,7 +545,8 @@ async function findOneInterestingPost(page, commentedUrls = new Set(), recentAut
     }
 
     // URL dedup
-    if (commentedUrls.has(post.postUrl)) {
+    const postId = extractPostId(post.postUrl);
+    if (commentedUrls.has(postId)) {
       console.log(`  [SKIP] Already commented → ${post.authorName}`);
       continue;
     }

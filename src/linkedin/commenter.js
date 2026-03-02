@@ -33,6 +33,7 @@ async function postComment(page, postUrl, commentText) {
     await page.waitForTimeout(800);
 
     // ── 1. LIKE the post ──
+    let liked = false;
     try {
       // Find the like button that is not yet activated
       const likeSelectors = [
@@ -44,12 +45,40 @@ async function postComment(page, postUrl, commentText) {
         const btn = page.locator(sel).first();
         if (await btn.isVisible({ timeout: 1500 }).catch(() => false)) {
           await btn.click();
-          console.log('    👍 Post liked');
+          console.log('    👍 Post liked (via selector)');
+          liked = true;
           await page.waitForTimeout(1200);
           break;
         }
       }
-    } catch { /* like is optional */ }
+      
+      // Fallback: evaluate the DOM to find any button with "Like" text and an outline icon
+      if (!liked) {
+        liked = await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll('button'));
+          for (const btn of btns) {
+            const text = (btn.innerText || btn.getAttribute('aria-label') || '').trim();
+            const isPressed = btn.getAttribute('aria-pressed') === 'true' || btn.classList.contains('react-button--active');
+            
+            // If it's the like button and it's NOT already liked
+            if ((text.toLowerCase() === 'like' || text.toLowerCase().includes('react like')) && !isPressed) {
+              btn.click();
+              return true;
+            }
+          }
+          return false;
+        });
+        
+        if (liked) {
+          console.log('    👍 Post liked (via DOM fallback)');
+          await page.waitForTimeout(1200);
+        } else {
+          console.log('    ⓘ Could not find an untoggled Like button (might already be liked).');
+        }
+      }
+    } catch (e) {
+      console.log(`    ⓘ Like failed to click gracefully: ${e.message.slice(0, 50)}`);
+    }
 
     // ── 2. Open the comment box ──
     let commentBox = null;

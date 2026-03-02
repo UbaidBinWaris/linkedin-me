@@ -19,7 +19,7 @@ function ensureDataFiles() {
   if (!fs.existsSync(config.data.commentedPostsPath)) {
     fs.writeFileSync(
       config.data.commentedPostsPath,
-      'post_url,author_name,comment_text,commented_at\n',
+      'post_url,author_name,comment_text,commented_at,profile_url\n',
       'utf-8'
     );
   }
@@ -35,7 +35,18 @@ function ensureDataFiles() {
 }
 
 /**
- * Reads the commented_posts.csv and returns a Set of post URLs already commented on.
+ * Extracts the 19-digit LinkedIn Activity ID from a URL or string.
+ * @param {string} url 
+ * @returns {string} The ID, or the original URL if no ID is found.
+ */
+function extractPostId(url) {
+  if (!url) return '';
+  const match = url.match(/\d{19}/);
+  return match ? match[0] : url;
+}
+
+/**
+ * Reads the commented_posts.csv and returns a Set of post IDs already commented on.
  * @returns {Promise<Set<string>>}
  */
 async function readCommentedPosts() {
@@ -57,7 +68,10 @@ async function readCommentedPosts() {
     if (url.startsWith('"') && url.endsWith('"')) {
       url = url.slice(1, -1);
     }
-    if (url) commentedUrls.add(url);
+    if (url) {
+      const id = extractPostId(url);
+      commentedUrls.add(id);
+    }
   }
 
   return commentedUrls;
@@ -85,7 +99,8 @@ async function readTodayCommentedCount() {
     const url = cols[0] ? cols[0].replace(/^"|"$/g, '').trim() : '';
     const timestamp = cols[3] ? cols[3].replace(/^"|"$/g, '').trim() : '';
     if (url && timestamp && timestamp.startsWith(today)) {
-      todayUrls.add(url);
+      const id = extractPostId(url);
+      todayUrls.add(id);
     }
   }
 
@@ -97,8 +112,9 @@ async function readTodayCommentedCount() {
  * @param {string} postUrl
  * @param {string} authorName
  * @param {string} commentText
+ * @param {string} profileUrl
  */
-async function writeCommentedPost(postUrl, authorName, commentText) {
+async function writeCommentedPost(postUrl, authorName, commentText, profileUrl = '') {
   ensureDataFiles();
   const timestamp = new Date().toISOString();
 
@@ -109,6 +125,7 @@ async function writeCommentedPost(postUrl, authorName, commentText) {
       { id: 'author_name', title: 'author_name' },
       { id: 'comment_text', title: 'comment_text' },
       { id: 'commented_at', title: 'commented_at' },
+      { id: 'profile_url', title: 'profile_url' },
     ],
     append: true,
   });
@@ -119,6 +136,7 @@ async function writeCommentedPost(postUrl, authorName, commentText) {
       author_name: authorName,
       comment_text: commentText,
       commented_at: timestamp,
+      profile_url: profileUrl,
     },
   ]);
 }
@@ -180,6 +198,7 @@ function parseCSVLine(line) {
 
 module.exports = {
   ensureDataFiles,
+  extractPostId,
   readCommentedPosts,
   readTodayCommentedCount,
   writeCommentedPost,

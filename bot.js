@@ -30,6 +30,7 @@ const { postComment }            = require('./src/linkedin/commenter');
 const { generateComment }        = require('./src/ai/gemini');
 const { pickRandomStyle, getStyleMemory } = require('./src/ai/commentStyles');
 const {
+  extractPostId,
   readCommentedPosts,
   writeCommentedPost,
   ensureDataFiles,
@@ -57,7 +58,7 @@ function waitForEnter(prompt) {
 }
 
 /** Human-like random delay */
-function delay(min = config.bot.minDelay, max = config.bot.maxDelay) {
+function delay(min = config.bot.minDelayMs, max = config.bot.maxDelayMs) {
   const ms = min + Math.floor(Math.random() * (max - min));
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -151,12 +152,12 @@ async function main() {
 
   try {
     // ── Step 5: Continuous Evaluation Loop ──────────────────────────
-    const MAX_RUNTIME_MS = 10 * 60 * 1000;
+    const MAX_RUNTIME_MS = 60 * 60 * 1000;
     const startTime = Date.now();
     const MAX_COMMENTS = config.bot.maxCommentsPerRun || 3;
     let commentsMade = 0;
 
-    logStep(5, `Starting Continuous Engagement Loop (Max ${MAX_COMMENTS} comments, 10 min limit)`);
+    logStep(5, `Starting Continuous Engagement Loop (Max ${MAX_COMMENTS} comments, 60 min limit)`);
     log(`Threshold: SCORE >= ${config.bot.minInterestScore}`);
     log('Filters active:');
     log('  • Skip OTW / job-seeking authors');
@@ -170,7 +171,7 @@ async function main() {
     const runSeenTexts = new Set();
 
     while (commentsMade < MAX_COMMENTS && (Date.now() - startTime) < MAX_RUNTIME_MS) {
-      log(`\n⏳ Time elapsed: ${Math.round((Date.now() - startTime) / 1000 / 60)} min / 10 min limit. Comments: ${commentsMade}/${MAX_COMMENTS}`);
+      log(`\n⏳ Time elapsed: ${Math.round((Date.now() - startTime) / 1000 / 60)} min / 60 min limit. Comments: ${commentsMade}/${MAX_COMMENTS}`);
       log("Scrolling feed and collecting batch of posts...");
       
       const postsBatch = await getFeedPostsBatch(page, 5);
@@ -191,15 +192,16 @@ async function main() {
         if (!post.postUrl) continue;
         
         // dedup within run
-        if (runSeenUrls.has(post.postUrl)) continue;
-        runSeenUrls.add(post.postUrl);
+        const postId = extractPostId(post.postUrl);
+        if (runSeenUrls.has(postId)) continue;
+        runSeenUrls.add(postId);
         
         const textKey = post.postText.slice(0, 60);
         if (runSeenTexts.has(textKey)) continue;
         runSeenTexts.add(textKey);
 
         // dedup globally
-        if (commentedUrls.has(post.postUrl)) continue;
+        if (commentedUrls.has(postId)) continue;
         
         // hard filters
         const { skip, reason } = shouldSkip(post.authorName, post.authorHeadline, post.postText);
@@ -283,8 +285,8 @@ async function main() {
             
             if (posted) {
               success(`   Posted! Saved to CSV.`);
-              await writeCommentedPost(post.postUrl, post.authorName, result.comment);
-              commentedUrls.add(post.postUrl);
+              await writeCommentedPost(post.postUrl, post.authorName, result.comment, post.profileUrl);
+              commentedUrls.add(postId);
               recentAuthors.add((post.authorName || '').toLowerCase());
               commentsMade++;
             } else {
@@ -295,10 +297,18 @@ async function main() {
           }
           
           log(`   Taking a break before continuing the hunt...`);
-          await delay(12000, 25000);
+          // User requested prolonged random delays like 2, 3, or 5 minutes
+          const minutesToWait = [2, 3, 4, 5][Math.floor(Math.random() * 4)];
+          const breakMs = minutesToWait * 60 * 1000 + Math.floor(Math.random() * 30000); // 2-5 mins + some random seconds
+          log(`   Pausing for ~${minutesToWait} minutes to seem human.`);
+          await new Promise(r => setTimeout(r, breakMs));
           
-          // Navigate back to feed
-          await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          // Navigate back to feed using browser history to retain scroll position
+          try {
+            await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30000 });
+          } catch (e) {
+            await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          }
           await delay(3000, 5000);
         }
       }
