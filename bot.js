@@ -124,9 +124,9 @@ async function main() {
   // ── Step 2: Prepare data files ───────────────────────────────────
   logStep(2, 'Preparing data files');
   ensureDataFiles();
-  const commentedUrls   = await readCommentedPosts();
-  const recentAuthors   = await loadRecentAuthors();
-  success(`Loaded ${commentedUrls.size} previously commented post(s) for deduplication.`);
+  let { ids: commentedIds, urls: commentedFullUrls } = await readCommentedPosts();
+  const recentAuthors = await loadRecentAuthors();
+  success(`Loaded ${commentedIds.size} previously commented post(s) for deduplication.`);
   success(`Loaded ${recentAuthors.size} recently contacted author(s) (7-day cooldown).`);
 
   // ── Step 3: Natural inactivity check ────────────────────────────
@@ -167,17 +167,42 @@ async function main() {
     log('  • Skip authors commented on in the last 7 days');
 
     // track seen across batches so we don't evaluate same posts
-    const runSeenUrls = new Set();
+    const runSeenUrls  = new Set();
     const runSeenTexts = new Set();
+    let   consecutiveEmptyBatches = 0;   // batches where nothing new was actionable
+    let   scrollPasses            = 5;   // start moderate; ramp up when stuck
 
     while (commentsMade < MAX_COMMENTS && (Date.now() - startTime) < MAX_RUNTIME_MS) {
       log(`\n⏳ Time elapsed: ${Math.round((Date.now() - startTime) / 1000 / 60)} min / 60 min limit. Comments: ${commentsMade}/${MAX_COMMENTS}`);
       log("Scrolling feed and collecting batch of posts...");
+
+      // ── When stuck, reload the feed so the DOM gets a completely fresh set ──
+      if (consecutiveEmptyBatches >= 3) {
+        log('  ↺ Reloading LinkedIn feed to fetch fresh posts...');
+        try {
+          await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+          await new Promise(r => setTimeout(r, 4000));
+        } catch (e) { warn(`  Feed reload error: ${e.message}`); }
+        consecutiveEmptyBatches = 0;
+        scrollPasses = 5;  // reset scroll depth after reload
+
+        // ── IMPORTANT: clear the run-level seen-URL cache ──
+        // After a full page reload LinkedIn shows a fresh set of posts.
+        // Keep only IDs that are permanently commented (commentedIds) so
+        // we don't skip whatever new posts appear after the reload.
+        const toRemove = [...runSeenUrls].filter(id => !commentedIds.has(id));
+        toRemove.forEach(id => runSeenUrls.delete(id));
+        runSeenTexts.clear();
+        log(`  ↺ Cleared ${toRemove.length} temporary seen-IDs (${runSeenUrls.size} permanent remain).`);
+      }
       
-      const postsBatch = await getFeedPostsBatch(page, 5);
+      const postsBatch = await getFeedPostsBatch(page, scrollPasses);
+      // Ramp up scroll passes each empty round so we dig deeper
+      scrollPasses = Math.min(scrollPasses + 2, 18);
       
       if (!postsBatch || postsBatch.length === 0) {
         warn('No posts found in this batch. Trying again in 5s...');
+        consecutiveEmptyBatches++;
         await delay(5000, 8000);
         continue;
       }
@@ -185,32 +210,54 @@ async function main() {
       log(`Found ${postsBatch.length} posts in batch. Evaluating...`);
       
       // evaluate posts sequentially
+      log(`  Evaluating ${postsBatch.length} post(s) from batch...`);
+      let skippedNoUrl    = 0;
+      let newActionable   = 0;   // posts that passed all filters and were scored
       for (let i = 0; i < postsBatch.length; i++) {
         if (commentsMade >= MAX_COMMENTS || (Date.now() - startTime) > MAX_RUNTIME_MS) break;
         
         const post = postsBatch[i];
-        if (!post.postUrl) continue;
+        if (!post.postUrl) {
+          skippedNoUrl++;
+          // Log every 4th no-URL skip to avoid spam
+          if (skippedNoUrl <= 2 || skippedNoUrl % 4 === 0) {
+            console.log(`  [SKIP] No URL (author: ${post.authorName || 'unknown'}, textLen: ${post.postText?.length || 0})`);
+          }
+          continue;
+        }
         
         // dedup within run
         const postId = extractPostId(post.postUrl);
-        if (runSeenUrls.has(postId)) continue;
+        const normalizedUrl = post.postUrl.replace(/\/+$/, '');
+        if (runSeenUrls.has(postId)) {
+          console.log(`  [SKIP] runSeenUrls: ${postId}`);
+          continue;
+        }
         runSeenUrls.add(postId);
         
         const textKey = post.postText.slice(0, 60);
-        if (runSeenTexts.has(textKey)) continue;
+        if (runSeenTexts.has(textKey)) {
+          console.log(`  [SKIP] runSeenTexts: ${textKey.replace(/\n/g, ' ')}`);
+          continue;
+        }
         runSeenTexts.add(textKey);
 
-        // dedup globally
-        if (commentedUrls.has(postId)) continue;
+        // dedup globally — check both activity ID and full URL
+        if (commentedIds.has(postId) || commentedFullUrls.has(normalizedUrl)) {
+          console.log(`  [SKIP] Already commented: ${postId}`);
+          continue;
+        }
         
         // hard filters
         const { skip, reason } = shouldSkip(post.authorName, post.authorHeadline, post.postText);
         if (skip) {
+          console.log(`  [SKIP] filter (${reason}): ${post.authorName}`);
           continue;
         }
         
         // 7-day cooldown
         if (recentAuthors.has((post.authorName || '').toLowerCase())) {
+          console.log(`  [SKIP] 7-day cooldown: ${post.authorName}`);
           continue;
         }
         
@@ -235,6 +282,7 @@ async function main() {
         const isGood  = score >= config.bot.minInterestScore;
         const mark    = isGood ? '[✓]' : '[✗]';
         
+        newActionable++;
         log(`  ${mark} ${nameStr} | score:${score} (H:${breakdown.heuristic} E:${breakdown.engagement} V:${breakdown.visibility}) | ${engStr}`);
         
         if (isGood) {
@@ -265,52 +313,76 @@ async function main() {
           const pauseMs = Math.round(Math.min(12, Math.max(4, words / 40)) * 1000);
           log(`   Post has ~${words} words — pausing ${(pauseMs/1000).toFixed(1)}s...`);
           
-          try {
-            await page.goto(post.postUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-            await new Promise(r => setTimeout(r, pauseMs));
-            
-            // Micro-behavior scroll check
-            if (Math.random() < 0.20) {
-              log('   Scroll-past behavior... scrolling before commenting...');
-              for (let j = 0; j < 3; j++) {
-                await page.evaluate(() => window.scrollBy(0, 400 + Math.random() * 300));
-                await delay(800, 1800);
-              }
-              await delay(2000, 4000);
-            }
+          // Human reading pause — postComment handles all navigation, just sleep here
+          await new Promise(r => setTimeout(r, pauseMs));
 
-            // Step 10: Post comment
-            logStep(10, 'Posting comment on LinkedIn');
+          // Step 10: Post comment
+          logStep(10, 'Posting comment on LinkedIn');
+          try {
+            // ── Last-minute safety guard: re-read CSV from disk right before posting ──
+            // Catches any race condition where another run wrote this URL since we loaded.
+            const preCheck = await readCommentedPosts();
+            if (preCheck.ids.has(postId) || preCheck.urls.has(normalizedUrl)) {
+              warn(`   [!] Skipped — URL was already saved to CSV (detected pre-post): ${postId}`);
+              commentedIds      = preCheck.ids;
+              commentedFullUrls = preCheck.urls;
+              continue;
+            }
+            commentedIds      = preCheck.ids;
+            commentedFullUrls = preCheck.urls;
+
             const posted = await postComment(page, post.postUrl, result.comment);
             
             if (posted) {
               success(`   Posted! Saved to CSV.`);
               await writeCommentedPost(post.postUrl, post.authorName, result.comment, post.profileUrl);
-              commentedUrls.add(postId);
+              // Update in-memory sets immediately so next iterations skip this post
+              commentedIds.add(postId);
+              commentedFullUrls.add(normalizedUrl);
               recentAuthors.add((post.authorName || '').toLowerCase());
               commentsMade++;
+
+              // Re-read from disk once more to stay fully in sync
+              const fresh = await readCommentedPosts();
+              commentedIds       = fresh.ids;
+              commentedFullUrls  = fresh.urls;
             } else {
               warn('   [!] Failed to post comment on page.');
             }
           } catch(e) {
-            warn(`   [!] Page interaction error: ${e.message}`);
+            warn(`   [!] Page interaction error: ${e.message.slice(0, 100)}`);
           }
-          
-          log(`   Taking a break before continuing the hunt...`);
-          // User requested prolonged random delays like 2, 3, or 5 minutes
-          const minutesToWait = [2, 3, 4, 5][Math.floor(Math.random() * 4)];
-          const breakMs = minutesToWait * 60 * 1000 + Math.floor(Math.random() * 30000); // 2-5 mins + some random seconds
-          log(`   Pausing for ~${minutesToWait} minutes to seem human.`);
-          await new Promise(r => setTimeout(r, breakMs));
-          
-          // Navigate back to feed using browser history to retain scroll position
+
+          // Ensure we are back on the feed for the next iteration
           try {
-            await page.goBack({ waitUntil: 'domcontentloaded', timeout: 30000 });
-          } catch (e) {
-            await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-          }
+            if (!page.url().includes('linkedin.com/feed')) {
+              await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+            }
+          } catch { /* page may be closed — next iteration's ensureOnFeed will recover */ }
           await delay(3000, 5000);
+
+          log(`   Taking a break before continuing the hunt...`);
+          const breakMinMin = config.bot.interCommentBreakMinMin;
+          const breakMaxMin = config.bot.interCommentBreakMaxMin;
+          const range = Math.max(1, breakMaxMin - breakMinMin);
+          const minutesToWait = breakMinMin + Math.floor(Math.random() * (range + 1));
+          const breakMs = minutesToWait * 60 * 1000 + Math.floor(Math.random() * 30000);
+          log(`   Pausing for ~${minutesToWait} min (range ${breakMinMin}–${breakMaxMin} from .env) to seem human.`);
+          await new Promise(r => setTimeout(r, breakMs));
+
+          // After posting, reset stuck state so next round starts fresh
+          consecutiveEmptyBatches = 0;
+          scrollPasses = 5;
         }
+      } // end for (postsBatch)
+
+      // Update stuck counter: if nothing actionable in this round, back off
+      if (newActionable === 0) {
+        consecutiveEmptyBatches++;
+        log(`  [!] No new actionable posts (${consecutiveEmptyBatches}/3 before feed reload). Waiting...`);
+        await delay(4000, 7000);
+      } else {
+        consecutiveEmptyBatches = 0;
       }
     }
 

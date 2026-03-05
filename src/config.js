@@ -15,6 +15,9 @@ const config = {
     // Minimum engagement score for a post to be considered "interesting"
     // Scale: 0-100. Posts below this are skipped.
     minInterestScore: parseInt(process.env.MIN_INTEREST_SCORE || '40', 10),
+    // Minutes to wait between comments (random in [min, max])
+    interCommentBreakMinMin: parseInt(process.env.INTER_COMMENT_BREAK_MIN_MIN || '2', 10),
+    interCommentBreakMaxMin: parseInt(process.env.INTER_COMMENT_BREAK_MAX_MIN || '5', 10),
   },
   browser: {
     headless: process.env.HEADLESS === 'true',

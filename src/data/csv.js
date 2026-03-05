@@ -46,12 +46,17 @@ function extractPostId(url) {
 }
 
 /**
- * Reads the commented_posts.csv and returns a Set of post IDs already commented on.
- * @returns {Promise<Set<string>>}
+ * Reads the commented_posts.csv and returns both:
+ *   - ids  : Set of 19-digit activity IDs (fast dedup)
+ *   - urls : Set of normalized full post URLs (exact-match dedup)
+ *
+ * Always re-reads from disk so mid-run writes are caught.
+ * @returns {Promise<{ids: Set<string>, urls: Set<string>}>}
  */
 async function readCommentedPosts() {
   ensureDataFiles();
-  const commentedUrls = new Set();
+  const ids  = new Set();
+  const urls = new Set();
 
   const fileContent = fs.readFileSync(config.data.commentedPostsPath, 'utf-8');
   const lines = fileContent.trim().split('\n');
@@ -69,12 +74,15 @@ async function readCommentedPosts() {
       url = url.slice(1, -1);
     }
     if (url) {
-      const id = extractPostId(url);
-      commentedUrls.add(id);
+      // Normalize: strip trailing slash for consistent matching
+      const normalized = url.replace(/\/+$/, '');
+      urls.add(normalized);
+      const id = extractPostId(normalized);
+      if (id) ids.add(id);
     }
   }
 
-  return commentedUrls;
+  return { ids, urls };
 }
 
 /**

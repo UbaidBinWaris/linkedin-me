@@ -155,6 +155,14 @@ function isSentimentPost(postText = '') {
  * Master skip check. Returns { skip: bool, reason: string }
  */
 function shouldSkip(authorName = '', authorHeadline = '', postText = '') {
+  // Skip LinkedIn UI section labels used as post "authors"
+  if (/^(suggested|promoted|sponsored|advertisement|people you may know|news)$/i.test((authorName || '').trim()))
+    return { skip: true, reason: `LinkedIn UI label as author: "${authorName}"` };
+
+  // Skip social-activity cards: "X commented on this", "X likes this", "X shared this", etc.
+  if (/\bcommented on\b|\blikes? this\b|\bshared this\b|\breacted to\b|\breposted this\b/i.test(authorName))
+    return { skip: true, reason: 'Social activity card (reshare/reaction) — skip' };
+
   if (isOpenToWork(authorName, authorHeadline, postText))
     return { skip: true, reason: 'Author is Open To Work' };
   if (isStudent(authorName, authorHeadline, postText))
@@ -163,6 +171,11 @@ function shouldSkip(authorName = '', authorHeadline = '', postText = '') {
     return { skip: true, reason: 'Post is a job advertisement' };
   if (isSentimentPost(postText))
     return { skip: true, reason: 'Post is about grief / tragedy — skip out of respect' };
+    
+  // Added temporarily for debug
+  if (postText.length < 80)
+    return { skip: true, reason: 'Post text is too short (< 80 chars)' };
+    
   return { skip: false, reason: '' };
 }
 

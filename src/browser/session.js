@@ -8,6 +8,8 @@ const config = require('../config');
 const LINKEDIN_FEED  = 'https://www.linkedin.com/feed/';
 const LINKEDIN_LOGIN = 'https://www.linkedin.com/login';
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // ───────────────── Helpers ─────────────────
 
 function waitForEnter(message) {
@@ -63,7 +65,7 @@ async function isSessionValid(page) {
   try {
     await page.goto(LINKEDIN_FEED, { waitUntil: 'domcontentloaded', timeout: 25000 });
     // Give the SPA a couple of seconds to decide where to redirect
-    await page.waitForTimeout(3000);
+    await sleep(3000);
 
     const url = page.url();
 
@@ -85,13 +87,13 @@ async function isSessionValid(page) {
 async function performManualLogin(page) {
   console.log('\n🔐 No valid session. Opening LinkedIn login page...');
   await page.goto(LINKEDIN_LOGIN, { waitUntil: 'domcontentloaded', timeout: 20000 });
-  await page.waitForTimeout(1500);
+  await sleep(1500);
 
   // Auto-fill if credentials are supplied
   if (config.linkedin.email && config.linkedin.password) {
     try {
       await page.fill('#username', config.linkedin.email);
-      await page.waitForTimeout(400);
+      await sleep(400);
       await page.fill('#password', config.linkedin.password);
       console.log('✅ Credentials auto-filled — click "Sign in" or handle 2FA in the browser.');
     } catch {
@@ -127,7 +129,7 @@ async function createSession() {
     await performManualLogin(page);
     // Confirm we are on the feed after login
     await page.goto(LINKEDIN_FEED, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await page.waitForTimeout(2000);
+    await sleep(2000);
   }
 
   return { browser, page };
