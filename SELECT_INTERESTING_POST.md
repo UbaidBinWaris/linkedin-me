@@ -1,98 +1,170 @@
-# 🔍 SELECT INTERESTING POST — Line-by-Line Code Explanation
+# 🔍 SELECT INTERESTING POST — Detailed Code Summary
 
-> **Files covered:** `src/linkedin/feed.js`, `src/linkedin/filters.js`, `src/linkedin/commenter.js`, `bot.js` (post selection steps)
-> **What this covers:** How the bot finds, filters, scores, and selects the best LinkedIn post to comment on.
+> **Files covered:** `src/linkedin/feed.js`, `src/linkedin/filters.js`
+> **What this covers:** How the bot navigates the feed, collects posts using 3 DOM strategies, applies hard filters, scores each candidate with a 6-dimension composite formula, and returns the single highest-scored post the bot hasn't already interacted with.
 
 ---
 
 ## 📁 `src/linkedin/filters.js` — Content Filtering & Scoring
 
-This file decides which posts to **skip** and which to **score**. It exports two main functions: `shouldSkip()` (hard filters) and `compositeScore()` (weighted ranking).
+This file decides **which posts to skip entirely** and **which to score**. It exports two main functions: `shouldSkip()` (hard filters) and `compositeScore()` (weighted ranking).
 
-### 🚫 Skip Signal Lists
+---
 
+### 🚫 Skip Signal Lists (Hard Filters)
+
+These lists are checked before any scoring occurs. If a post matches any of them, it's rejected immediately.
+
+#### `OTW_SIGNALS` — Open To Work Detection
 ```js
 const OTW_SIGNALS = [
   'open to work', 'open to opportunities', '#opentowork', 'open for work',
-  'actively seeking', 'actively looking', 'available for hire', ...
+  '#openforwork', 'actively seeking', 'actively looking', 'available for hire',
+  'available for opportunities', 'job seeker', '#jobseeker', 'seeking employment',
+  'seeking a role', 'seeking new role', 'looking for a job', 'looking for work',
+  'looking for opportunities', 'looking for my next', 'in search of',
+  'open for job', '#hireme', '#lookingforjob',
 ];
 ```
-Array of phrases that indicate a person is job-seeking. If any of these appear in the author's name, headline, or post — the post is **skipped entirely**. Commenting on job-seekers doesn't build your authority.
+Phrases that identify a person actively job-seeking. Checked in the author name, headline, **and** first 400 chars of the post text. Commenting on job-seekers offers no authority-building value.
 
+#### `STUDENT_SIGNALS` — Junior/Student Detection
 ```js
 const STUDENT_SIGNALS = [
-  'student', 'undergraduate', 'bsc student', 'intern', 'internship',
-  'fresher', 'fresh graduate', 'entry level', 'junior developer',
-  'aspiring developer', 'bootcamp', 'self-taught', 'learning to code', ...
+  'student', 'undergraduate', 'bsc student', 'btech student', 'cs student',
+  'intern', 'internship', 'fresher', 'fresh graduate', 'recent graduate',
+  'new graduate', 'entry level', 'junior developer', 'aspiring developer',
+  'bootcamp', 'coding bootcamp', 'self-taught', 'self taught',
+  'learning to code', 'learning programming', ...
 ];
 ```
-Phrases that identify students, interns, and junior-level people. Commenting on their posts gives no professional exposure.
+Identifies students, interns, and entry-level individuals. Commenting on their posts gives minimal professional exposure.
 
+#### `JOB_POST_SIGNALS` — Job Advertisement Detection
 ```js
 const JOB_POST_SIGNALS = [
-  "we're hiring", 'we are hiring', 'now hiring', 'join our team',
-  'apply now', 'send your cv', 'job opening', '#hiring', '#vacancy', ...
+  "we're hiring", 'we are hiring', 'now hiring', 'join our team', 'apply now',
+  'apply here', 'send your cv', 'job opening', '#hiring', '#vacancy', '#recruitment', ...
 ];
 ```
-Phrases that identify job advertisements posted by recruiters or companies. These are high-engagement but commenting on them offers zero authority-building value.
+Identifies recruiter/company job listings. High engagement, but zero authority value for commenting.
 
+#### `SENTIMENT_SKIP_SIGNALS` — Grief / Tragedy Detection
 ```js
 const SENTIMENT_SKIP_SIGNALS = [
-  'lost my', 'passed away', 'rest in peace', 'rip ', 'we lost',
-  'diagnosed with', 'cancer', 'funeral', 'grieving',
-  'laid off today', 'just got laid off', 'suicide', 'depression', ...
+  'lost my', 'passed away', 'rest in peace', 'rip ', 'diagnosed with', 'cancer',
+  'funeral', 'grieving', 'laid off today', 'just got laid off', 'suicide',
+  'depression', 'struggling mentally', 'tragedy', 'devastating news', ...
 ];
 ```
-Posts about grief, tragedy, or mental health crises. The bot **never** comments on these out of ethical respect — automated empathy is inappropriate.
+Posts about personal tragedy or mental health crises. The bot **never** comments on these — automated empathy is inappropriate.
+
+---
 
 ### 📈 Scoring Signal Lists
 
+These shape the quality and relevance scores — they don't hard-reject, they adjust the numeric score.
+
+#### `NICHE_SIGNALS` — Expertise Relevance (Full Stack / AI)
 ```js
 const NICHE_SIGNALS = [
-  'nodejs', 'node.js', 'backend', 'api design', 'graphql', 'microservices',
-  'nextjs', 'next.js', 'react', 'typescript', 'full stack',
+  // Backend / infra
+  'nodejs', 'node.js', 'backend', 'api design', 'rest api', 'graphql',
+  'microservices', 'distributed systems', 'system design', 'architecture',
+  'kubernetes', 'docker', 'devops', 'ci/cd', 'deployment',
+  // Frontend / full-stack
+  'nextjs', 'next.js', 'react', 'typescript', 'full stack', 'fullstack',
+  // AI / automation
   'ai workflow', 'automation', 'n8n', 'llm', 'ai agent', 'openai', 'gemini',
-  'saas', 'startup', 'founder', 'cto', 'shipped', 'launched', ...
+  'langchain', 'rag', 'prompt engineering',
+  // General high-value
+  'saas', 'startup', 'founder', 'cto', 'ceo', 'product', 'engineering',
+  'developer experience', 'open source', 'shipped', 'launched',
 ];
 ```
-Keywords matching the bot owner's expertise area (Full Stack / AI). More hits = higher niche relevance score. This targets posts where your comment will be most credible.
+Each keyword match adds **+15 niche points** (capped at 100). Posts matching 7+ signals = perfect niche relevance.
 
+#### `SENIORITY_SIGNALS` — Author Headline Rank
 ```js
 const SENIORITY_SIGNALS = [
   ['founder', 25], ['co-founder', 25], ['ceo', 25], ['cto', 22],
-  ['chief', 20], ['vp ', 20], ['director', 15], ['head of', 15],
-  ['staff engineer', 14], ['engineering manager', 12], ['senior', 10], ...
+  ['chief', 20],   ['vp ', 20],        ['vice president', 20], ['partner', 18],
+  ['director', 15],['head of', 15],    ['principal', 14],
+  ['staff engineer', 14],              ['staff software', 14],
+  ['engineering manager', 12],         ['product manager', 12],
+  ['sr.', 10],     ['senior', 10],     ['lead ', 10],
 ];
 ```
-An array of `[keyword, points]` pairs. These match against the author's LinkedIn headline. A `founder` is worth 25 seniority points, a `senior` engineer is worth 10. Higher-seniority authors = bigger professional exposure when you comment.
+`[keyword, points]` tuples, checked against the author's LinkedIn headline. First match wins (ordered highest first). Raw points × 4 = seniority score (e.g., `founder` → 25 × 4 = 100). Unknown headline defaults to 20 neutral points.
 
+**Follower Proxy Boosts** (applied on top):
+- `creator` / `newsletter` in headline → **+15 pts**
+- `angel` / `investor` in headline → **+10 pts**
+- Max seniority is capped at **80** before proxy boost, total at **100**.
+
+#### `GOOD_SIGNALS` — Content Quality Keywords
 ```js
 const GOOD_SIGNALS = [
-  'startup', 'founder', 'product', 'engineering', 'ai', 'leadership',
-  'lesson', 'learned', 'mistake', 'growth', 'scale', 'built', 'shipped', ...
+  'startup', 'founder', 'product', 'engineering', 'developer', 'software',
+  'ai', 'machine learning', 'devops', 'architecture', 'design', 'backend',
+  'leadership', 'team', 'lesson', 'learned', 'mistake', 'failure',
+  'growth', 'scale', 'strategy', 'decision', 'insight', 'opinion',
+  'built', 'shipped', 'launched', 'revenue', 'mrr', 'bootstrap',
+  'open source', 'automation', 'workflow', 'experience', 'story',
 ];
 ```
-Content-quality keywords. Posts with these words tend to contain real insights, stories, or opinions — ideal for adding value with a comment.
+Each match adds **+5 points** to the heuristic score. Posts with real insights, opinions, or stories score higher.
 
+#### `BAD_SIGNALS` — Engagement Bait / Low-Value Patterns
 ```js
 const BAD_SIGNALS = [
   'motivational quote', 'agree?', 'share if you agree',
-  'repost if', 'double tap', 'humble', 'like if', 'comment below', ...
+  'repost if', 'double tap', 'humble', 'blessed', 'grateful for',
+  'like if', 'comment below', 'what do you think?',
 ];
 ```
-Low-quality engagement-bait patterns. Each hit subtracts points from the heuristic score.
+Each match subtracts **-10 points** from the heuristic score.
+
+#### `STORY_ARC_SIGNALS` — Narrative Content Boost
+```js
+const STORY_ARC_SIGNALS = [
+  'started', 'failed', 'learned', 'realized', 'after 3 years', 'in 2020',
+  'in 2021', 'in 2022', 'we almost', 'i almost',
+];
+```
+If **2 or more** story-arc words are found → **+20 points** heuristic bonus. Story-driven posts invite more meaningful replies.
+
+#### `AI_SPAM_SIGNALS` — AI-Generated Content Penalty
+```js
+const AI_SPAM_SIGNALS = [
+  'in today's fast paced world', 'as we navigate', 'it is important to',
+  'here are 5 lessons', 'here are 3 lessons', 'delve into', "let's dive in",
+];
+```
+Each match → **-20 points** heuristic penalty. Generic AI-generated posts don't merit thoughtful engagement.
+
+#### `ENGAGEMENT_POD_SIGNALS` — Pod Thread Penalty
+```js
+const ENGAGEMENT_POD_SIGNALS = [
+  'nice one bro', 'dm sent', 'check inbox', 'interested', 'great post',
+  'thanks for sharing', 'commenting for reach',
+];
+```
+Checked against visible comments (up to 3). If **2+ pod phrases** are found in the thread → **-30 points** heavy heuristic penalty. Pod posts inflate engagement artificially.
 
 ---
 
 ### 🛠 Helper Functions
 
+#### `lc(...parts)`
 ```js
 function lc(...parts) {
   return parts.filter(Boolean).join(' ').toLowerCase();
 }
 ```
-Utility: takes multiple string arguments, filters out falsy values (null/undefined), joins them with a space, and lowercases the result. Used to normalize text for case-insensitive matching.
+Joins multiple strings (filtering out nulls) into one lowercase string. Used everywhere for case-insensitive keyword matching.
 
+#### `hasAny(text, signals)`
 ```js
 function hasAny(text, signals) {
   return signals.some((s) => {
@@ -101,41 +173,28 @@ function hasAny(text, signals) {
   });
 }
 ```
-Checks if `text` contains ANY of the keywords in `signals`. The `Array.isArray(s) ? s[0] : s` handles both plain strings (`'founder'`) and `[keyword, points]` tuples — takes just the keyword part.
+Returns `true` if `text` includes ANY signal keyword. Handles both plain strings and `[kw, pts]` tuples.
 
+#### `clamp(val, min, max)`
 ```js
-function clamp(val, min, max) {
-  return Math.min(max, Math.max(min, val));
-}
+function clamp(val, min, max) { return Math.min(max, Math.max(min, val)); }
 ```
-Ensures a number stays within a range. Example: `clamp(150, 0, 100)` returns `100`. Used throughout to keep scores in the 0–100 range.
+Ensures a numeric value stays within `[min, max]`. Used throughout to keep scores in 0–100.
 
 ---
 
-### 🚫 Skip Check Functions
+### 🚫 Hard-Filter Function: `shouldSkip(authorName, authorHeadline, postText)`
 
 ```js
-function isOpenToWork(authorName, authorHeadline, postText) {
-  return hasAny(lc(authorName, authorHeadline, postText.slice(0, 400)), OTW_SIGNALS);
-}
-```
-Combines the author name, headline, and first 400 chars of post text into one lowercase string, then checks for open-to-work keywords. `slice(0, 400)` limits how much text is scanned (performance + avoids false positives deep in post body).
+function shouldSkip(authorName = '', authorHeadline = '', postText = '') {
+  // Reject LinkedIn UI labels being parsed as author names
+  if (/^(suggested|promoted|sponsored|advertisement|people you may know|news)$/i.test(authorName.trim()))
+    return { skip: true, reason: `LinkedIn UI label as author: "${authorName}"` };
 
-```js
-function isStudent(authorName, authorHeadline, postText) {
-  return hasAny(lc(authorName, authorHeadline, postText.slice(0, 400)), STUDENT_SIGNALS);
-}
-function isJobPost(postText) {
-  return hasAny(lc('', '', postText.slice(0, 800)), JOB_POST_SIGNALS);
-}
-function isSentimentPost(postText) {
-  return hasAny(lc('', '', postText.slice(0, 600)), SENTIMENT_SKIP_SIGNALS);
-}
-```
-Each function checks a different category. `isJobPost` scans more characters (800) because hiring posts often bury the key phrase. `isSentimentPost` only scans 600 chars because grief/tragedy mentions are usually near the start.
+  // Reject social-activity "reshare" cards (X commented on this, X likes this)
+  if (/\bcommented on\b|\blikes? this\b|\bshared this\b|\breacted to\b|\breposted this\b/i.test(authorName))
+    return { skip: true, reason: 'Social activity card (reshare/reaction) — skip' };
 
-```js
-function shouldSkip(authorName, authorHeadline, postText) {
   if (isOpenToWork(authorName, authorHeadline, postText))
     return { skip: true, reason: 'Author is Open To Work' };
   if (isStudent(authorName, authorHeadline, postText))
@@ -144,97 +203,157 @@ function shouldSkip(authorName, authorHeadline, postText) {
     return { skip: true, reason: 'Post is a job advertisement' };
   if (isSentimentPost(postText))
     return { skip: true, reason: 'Post is about grief / tragedy — skip out of respect' };
+  if (postText.length < 80)
+    return { skip: true, reason: 'Post text is too short (< 80 chars)' };
+
   return { skip: false, reason: '' };
 }
 ```
-Master gate function. Runs all four checks in priority order. Returns `{ skip: true, reason: '...' }` on first match (stops early — efficient). If all pass, returns `{ skip: false }`.
+
+Runs all checks **in priority order**. Returns `{ skip: true, reason }` on first match (early-exit = efficient). All checks pass → `{ skip: false }`.
 
 ---
 
 ### 📊 Composite Scoring Sub-functions
 
-#### `calcHeuristicScore(postText)` — Content Quality Score (weight: 40%)
+The composite score is built from **6 independent sub-scores**, each normalized to 0–100, then combined with weights.
+
+#### 1. `calcHeuristicScore(postText, commentsData)` — Content Quality (weight: **35%**)
 
 ```js
-function calcHeuristicScore(postText) {
-  const t = lc('', '', postText);
-  if (postText.length < 100) return 0;           // too short = skip
+function calcHeuristicScore(postText = '', commentsData = []) {
+  if (postText.length < 100) return 0;    // Too short = no content
   let score = 0;
-  if (postText.length > 300)  score += 15;       // medium length
-  if (postText.length > 600)  score += 10;       // long form
-  if (postText.length > 1000) score += 5;        // very detailed
-  for (const kw of GOOD_SIGNALS) if (t.includes(kw)) score += 5;   // +5 per good keyword
-  for (const kw of BAD_SIGNALS)  if (t.includes(kw)) score -= 10;  // -10 per bad keyword
+  if (postText.length > 300)  score += 15; // Medium length bonus
+  if (postText.length > 600)  score += 10; // Long-form bonus
+  if (postText.length > 1000) score += 5;  // Very detailed bonus
+
+  for (const kw of GOOD_SIGNALS)    if (t.includes(kw)) score += 5;   // +5 per good keyword
+  for (const kw of BAD_SIGNALS)     if (t.includes(kw)) score -= 10;  // -10 per bad keyword
+
+  // Story arc boost: 2+ narrative keywords = +20
+  let storyWordCount = 0;
+  for (const kw of STORY_ARC_SIGNALS) if (t.includes(kw)) storyWordCount++;
+  if (storyWordCount >= 2) score += 20;
+
+  // AI spam penalty: -20 per AI-spam phrase
+  for (const kw of AI_SPAM_SIGNALS) if (t.includes(kw)) score -= 20;
+
+  // Engagement pod penalty: -30 if 2+ pod keywords in comments
+  if (commentsData && commentsData.length > 0) {
+    let podHits = 0;
+    const commentsText = commentsData.join(' ').toLowerCase();
+    for (const kw of ENGAGEMENT_POD_SIGNALS) if (commentsText.includes(kw)) podHits++;
+    if (podHits >= 2) score -= 30;
+  }
+
   return clamp(score, 0, 100);
 }
 ```
-- Posts under 100 chars score 0 (no content).
-- Length bonuses reward detailed, thoughtful posts.
-- Each GOOD_SIGNAL keyword found adds 5 points.
-- Each BAD_SIGNAL keyword found subtracts 10 points.
-- `clamp(score, 0, 100)` ensures the result stays in 0–100 range.
 
-#### `calcEngagementScore(reactionCount, commentCount)` — Engagement Score (weight: 25%)
+**Contextual modifiers** applied in `compositeScore()` on top of this base:
+- **Early Traction Boost:** 15–150 reactions AND ≤40 comments → `+15` — post is gaining momentum
+- **Network Proximity Boost:** author is a 1st-degree connection → `+15`
+- **Post Format:** text post `+10`, image `+5`, poll `-10` — text posts invite text responses
+- **Comment Depth Opportunity:** visible comments average length < 50 chars → `+20` — shallow thread, easier to stand out
+- **Author Reply Probability:** author has replied to existing comments → `+20` — they're actively engaging
+
+#### 2. `calcEngagementScore(reactionCount, commentCount)` — Engagement (weight: **15%**)
 
 ```js
-function calcEngagementScore(reactionCount, commentCount) {
-  if (reactionCount < 5)     return 10;   // very low engagement still okay (new post)
-  if (reactionCount > 10000) return 15;   // viral = too noisy, avoid
-  if (commentCount > 200)    return 10;   // too crowded, your comment gets buried
+function calcEngagementScore(reactionCount = 0, commentCount = 0) {
+  if (reactionCount < 5)     return 25;  // Very new / unparsed — reduced penalty
+  if (reactionCount > 10000) return 15;  // Viral = noisy, buried comment
+  if (commentCount > 200)    return 10;  // Overcrowded thread
 
-  const reactionScore = Math.log10(reactionCount + 1) * 20;   // log scale 0-100
-  const sweetSpot = reactionCount >= 20 && reactionCount <= 500 ? 20 : 0;  // bonus
+  const reactionScore = Math.log10(reactionCount + 1) * 20;  // Log-scale 0~60
+  const sweetSpot = (reactionCount >= 20 && reactionCount <= 500) ? 20 : 0;  // +20 bonus
   return clamp(reactionScore + sweetSpot, 0, 100);
 }
 ```
-Key design decisions:
-- **Too few reactions (<5):** Post may be new and unseen — score 10 (neutral).
-- **Viral posts (>10k reactions):** Your comment gets buried in noise — penalized to 15.
-- **Too many comments (>200):** Crowded threads hide your comment — penalized to 10.
-- **Log scale:** `Math.log10(reactions + 1) * 20` — goes from 0 (0 reactions) to ~60 (1000 reactions) smoothly. Prevents viral posts from dominating just because of a linear high count.
-- **Sweet spot bonus (+20):** 20–500 reactions = optimal visibility. Your comment appears before the flood, but after enough people care.
 
-#### `calcSeniorityScore(authorHeadline)` — Author Seniority Score (weight: 15%)
+Key design decisions:
+| Condition | Score | Reason |
+|-----------|-------|--------|
+| `< 5 reactions` | 25 | May be brand new — don't overly penalize |
+| `> 10,000 reactions` | 15 | Viral — your comment disappears in noise |
+| `> 200 comments` | 10 | Too crowded to be visible |
+| **20–500 reactions** | **+20 bonus** | Sweet spot — momentum without noise |
+| Log scale otherwise | 0–60 | Smooth growth, prevents linear dominance |
+
+**Time Momentum Bonus:** If `postAge` contains `"m •"` (minutes old) or `"1h •"` AND reactions ≥ 50 → additional **+20** to engagement score.
+
+#### 3. `calcCommentVisibilityScore(commentCount)` — Visibility Potential (weight: **15%**)
 
 ```js
-function calcSeniorityScore(authorHeadline) {
-  const hl = authorHeadline.toLowerCase();
-  for (const [kw, pts] of SENIORITY_SIGNALS) {
-    if (hl.includes(kw)) return clamp(pts * 4, 0, 100);
-  }
-  return 20;  // unknown headline = neutral
+function calcCommentVisibilityScore(commentCount = 0) {
+  if (commentCount <= 5)   return 90;   // Early comments get maximum exposure
+  if (commentCount <= 20)  return 100;  // Perfect — some discussion, still discoverable
+  if (commentCount <= 50)  return 75;
+  if (commentCount <= 100) return 50;
+  if (commentCount <= 200) return 25;
+  return 10;                            // Deep thread — you'll be buried
 }
 ```
-- Iterates through `SENIORITY_SIGNALS` in priority order (founders first).
-- On first match, returns `pts * 4` (e.g., `founder` = 25 × 4 = 100, `senior` = 10 × 4 = 40).
-- The `* 4` multiplier scales the raw seniority points into the 0–100 range.
-- Unknown headline = 20 (slight penalty, not zero — the post may still be valuable).
 
-#### `calcNicheScore(postText)` — Niche Relevance Score (weight: 10%)
+This **separate dimension** (introduced from old `engagement`) specifically measures the likelihood that your comment will be **seen** by other readers. A post with 20 comments is ideal — enough discussion to attract readers, few enough that your comment is prominent.
+
+#### 4. `calcSeniorityScore(authorHeadline)` — Author Seniority (weight: **15%**)
 
 ```js
-function calcNicheScore(postText) {
-  const t = lc('', '', postText);
+function calcSeniorityScore(authorHeadline = '') {
+  const hl = authorHeadline.toLowerCase();
+
+  let proxyBoost = 0;
+  if (hl.includes('creator') || hl.includes('newsletter')) proxyBoost += 15;
+  if (hl.includes('angel') || hl.includes('investor'))     proxyBoost += 10;
+
+  let rawScore = 20; // neutral default
+  for (const [kw, pts] of SENIORITY_SIGNALS) {
+    if (hl.includes(kw)) {
+      rawScore = pts * 4;
+      break; // ordered descending — take highest match
+    }
+  }
+
+  return clamp(Math.min(rawScore, 80) + proxyBoost, 0, 100);
+}
+```
+
+- Raw seniority capped at 80 to prevent a single high-rank author from dominating the overall score.
+- Proxy boosts for creators/investors on top (reflecting their large audiences).
+
+#### 5. `calcNicheScore(postText)` — Niche Relevance (weight: **10%**)
+
+```js
+function calcNicheScore(postText = '') {
   let hits = 0;
   for (const kw of NICHE_SIGNALS) if (t.includes(kw)) hits++;
   return clamp(hits * 15, 0, 100);
 }
 ```
-Counts how many niche keywords appear (Node.js, React, AI, automation, etc.). Each hit adds 15 points. At 7+ hits, the score reaches 100 (clamped). Posts closely matching your expertise receive the highest niche scores.
 
-#### `calcRecencyScore(positionIndex, totalPosts)` — Recency Score (weight: 10%)
+Counts niche keyword matches. Each hit = **+15 pts** (7 hits maxes out at 100). Ensures the bot comments where its expertise is most credible.
+
+#### 6. `calcRecencyScore(positionIndex, totalPosts, postAge)` — Recency (weight: **10%**)
 
 ```js
-function calcRecencyScore(positionIndex, totalPosts) {
-  if (totalPosts === 0) return 50;
-  const ratio = 1 - (positionIndex / totalPosts);
-  return clamp(ratio * 100, 0, 100);
+function calcRecencyScore(positionIndex = 0, totalPosts = 10, postAge = '') {
+  let score = 50;
+  if (totalPosts > 0) {
+    const ratio = 1 - (positionIndex / totalPosts);
+    score = ratio * 100;
+  }
+  // Boost for posts timestamped as minutes or 1h old
+  const lowerAge = (postAge || '').toLowerCase();
+  if (lowerAge.includes('m •') || lowerAge.includes('1h •')) {
+    score += 20;
+  }
+  return clamp(score, 0, 100);
 }
 ```
-Uses post *position in the feed* as a proxy for recency (no actual timestamps without visiting each post).
-- Post at index 0 (top of feed) = ratio 1.0 = score 100 (most recent).
-- Post at last position = ratio ≈ 0 = score ~0 (oldest).
-- If `totalPosts = 0`, returns safe default 50.
+
+Since the bot doesn't navigate to each post to read its timestamp, **feed position** serves as a recency proxy (earlier in feed = more recent). The `postAge` string (scraped from `.update-components-actor__sub-description`) provides a real boost when the post is confirmed to be minutes or 1 hour old.
 
 ---
 
@@ -242,39 +361,61 @@ Uses post *position in the feed* as a proxy for recency (no actual timestamps wi
 
 ```js
 function compositeScore(post) {
-  const { postText, authorHeadline, reactionCount, commentCount, positionIndex, totalPosts } = post;
-
-  const heuristic  = calcHeuristicScore(postText);
-  const engagement = calcEngagementScore(reactionCount, commentCount);
+  let heuristic  = calcHeuristicScore(postText, commentsData);
+  let engagement = calcEngagementScore(reactionCount, commentCount);
   const seniority  = calcSeniorityScore(authorHeadline);
   const niche      = calcNicheScore(postText);
-  const recency    = calcRecencyScore(positionIndex, totalPosts);
+  let recency    = calcRecencyScore(positionIndex, totalPosts, postAge);
+  const visibility = calcCommentVisibilityScore(commentCount);
 
-  const total = (heuristic  * 0.40)
-              + (engagement * 0.25)
+  // --- Contextual modifiers applied to heuristic ---
+  if (reactionCount >= 15 && reactionCount <= 150 && commentCount <= 40) heuristic += 15; // Early traction
+  if (isConnection)  heuristic += 15;   // 1st-degree network
+  if (postFormat === 'text')   heuristic += 10;
+  if (postFormat === 'image')  heuristic += 5;
+  if (postFormat === 'poll')   heuristic -= 10;
+  if (commentsData.length > 0) {
+    const avgLen = commentsData.reduce((acc, c) => acc + c.length, 0) / commentsData.length;
+    if (avgLen < 50) heuristic += 20; // Shallow thread — easy to stand out
+  }
+  if (authorReplied) heuristic += 20;  // Author is actively engaging
+
+  // --- Time momentum: boost engagement if trending now ---
+  if ((lowerAge.includes('m •') || lowerAge.includes('1h •')) && reactionCount >= 50) {
+    engagement += 20;
+  }
+
+  heuristic  = clamp(heuristic, 0, 100);
+  engagement = clamp(engagement, 0, 100);
+
+  // --- Weighted composite ---
+  const total = (heuristic  * 0.35)
+              + (engagement * 0.15)
+              + (visibility * 0.15)
               + (seniority  * 0.15)
               + (niche      * 0.10)
               + (recency    * 0.10);
 
   return {
     total: Math.round(clamp(total, 0, 100)),
-    breakdown: { heuristic, engagement, seniority, niche, recency },
+    breakdown: { heuristic, engagement, seniority, niche, recency, visibility },
     shouldComment: total >= 30,
   };
 }
 ```
-Calculates each sub-score, then applies **weighted sum**:
 
-| Factor | Weight | Why |
-|--------|--------|-----|
-| Content quality (heuristic) | **40%** | Most important — content must be relevant |
-| Engagement | **25%** | Social proof + visibility window |
-| Author seniority | **15%** | Higher-profile authors = more exposure |
-| Niche relevance | **10%** | Credibility of your comment |
-| Recency | **10%** | Fresher posts get more eyes |
+**Weight table:**
 
-- `shouldComment: total >= 30` — any post scoring 30+/100 passes the threshold.
-- `Math.round(clamp(total, 0, 100))` — rounds to nearest integer, keeps in 0–100.
+| Dimension | Weight | Signal |
+|-----------|--------|--------|
+| Heuristic (content quality) | **35%** | Real content, story arcs, no AI spam |
+| Engagement | **15%** | Reaction sweet spot, viral avoidance |
+| Visibility | **15%** | Comment thread depth — will yours be seen? |
+| Seniority | **15%** | Author title → audience size |
+| Niche | **10%** | Matches your expertise cluster |
+| Recency | **10%** | Feed position + confirmed post age |
+
+> **Note:** Old formula was `H×40 + E×25 + S×15 + N×10 + R×10`. The current formula adds `Visibility` as a separate 15% axis and redistributes weight accordingly.
 
 ---
 
@@ -284,8 +425,7 @@ Calculates each sub-score, then applies **weighted sum**:
 
 ```js
 async function ensureOnFeed(page) {
-  const url = page.url();
-  if (url.includes('linkedin.com/feed')) { return; }  // already there
+  if (page.url().includes('linkedin.com/feed')) return;  // already there
   const clicked = await page.evaluate(() => {
     const l = document.querySelector('a[href="/feed/"]') ||
               document.querySelector('a[href="https://www.linkedin.com/feed/"]');
@@ -295,129 +435,157 @@ async function ensureOnFeed(page) {
   if (!clicked) {
     await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
   }
-  await page.waitForTimeout(4000);
+  await sleep(4000);
 }
 ```
-- `page.url()`: Gets the current URL of the Playwright browser page.
-- If already on feed, returns immediately.
-- `page.evaluate(() => {...})`: Runs JavaScript code **inside the browser** (not Node.js). It searches for the feed nav link and clicks it — mimicking how a human would navigate.
-- If the nav link isn't found, uses `page.goto()` to hard-navigate to the feed URL.
-- `waitForTimeout(4000)`: Waits 4 seconds for the page to load and render.
 
-### 📜 `scrollFeed(page, passes)` — Human-Like Scrolling
+- Checks current URL first (no navigation if already on feed).
+- Tries to click the nav link in-page (mimics human behaviour).
+- Falls back to hard `page.goto()` only if the nav link is missing.
+- Uses `sleep(4000)` — a plain `Promise/setTimeout` wrapper since Playwright's `waitForTimeout` was removed in newer versions.
+
+---
+
+### 📜 `scrollFeed(page, passes = 10)` — Human-Like Scrolling with Keyboard Events
 
 ```js
 async function scrollFeed(page, passes = 10) {
+  try { await page.click('body', { force: true }); } catch (_) {}
+
   for (let i = 0; i < passes; i++) {
-    const amount = 400 + Math.floor(Math.random() * 500);
-    await page.evaluate((px) => window.scrollBy(0, px), amount);
-    await page.waitForTimeout(700 + Math.floor(Math.random() * 600));
+    const amount = 600 + Math.floor(Math.random() * 700); // 600–1300 px
+    await page.evaluate((px) => {
+      // Find the actual scrollable container via computed overflow
+      let container = null;
+      for (const sel of ['.scaffold-layout__main', 'div[class*="scaffold-finite-scroll"]', ...]) {
+        const el = document.querySelector(sel);
+        if (el && (overflowY === 'auto' || overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 100) {
+          container = el; break;
+        }
+      }
+      if (container) container.scrollBy(0, px);
+      else window.scrollBy(0, px);
+    }, amount);
+
+    if (i % 3 === 2) {
+      await page.keyboard.press('End'); // triggers LinkedIn's virtual scroll loader
+      await sleep(400);
+    }
+    await sleep(700 + Math.floor(Math.random() * 500));
   }
-  await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(1200);
+
+  // Final flush — scroll deepest container fully to bottom
+  await page.evaluate(() => { /* scroll everything to bottom */ });
+  await page.keyboard.press('End');
+  await sleep(1800);
 }
 ```
-- Scrolls down 10 times (each by 400–900px — randomized so it doesn't look like a bot with fixed pixel amounts).
-- Waits 700–1300ms between scrolls (randomized — humans scroll at varying speeds).
-- After 10 passes, scrolls back to the top with `window.scrollTo(0, 0)`.
-- This loads more posts into the DOM (LinkedIn's infinite scroll) before post collection begins.
+
+Key improvements over naive scrolling:
+- **Detects the real scroll container** — LinkedIn often puts `overflow:hidden` on `<main>` but scrolls an inner `.scaffold-layout__main` div. The function probes computed `overflowY` to find the actual scrollable ancestor.
+- **Randomized amounts** (600–1300 px) and **randomized delays** (700–1200ms) — defeats bot-detection pattern recognition.
+- **Keyboard `End` every 3rd pass** — fires a native keyboard event that triggers LinkedIn's virtual scroll (infinite feed loader).
+- **Final flush** at the end ensures the full feed is loaded before scraping.
+
+---
 
 ### 🔢 `parseEngagement(cardText)` — Extract Reaction/Comment Counts
 
 ```js
 function parseEngagement(cardText = '') {
-  const reactionMatch = cardText.match(/([\d,\.]+\s*[Kk]?)\s+reactions?/i);
-  const commentMatch  = cardText.match(/([\d,\.]+\s*[Kk]?)\s+comments?/i);
+  const reactionMatch = cardText.match(/([\d,\.]+\s*[KkMm]?)\s*(?:reactions?|likes?)/i);
+  const commentMatch  = cardText.match(/([\d,\.]+\s*[KkMm]?)\s*comments?/i);
   if (reactionMatch) reactionCount = parseCount(reactionMatch[1]);
   if (commentMatch)  commentCount  = parseCount(commentMatch[1]);
   return { reactionCount, commentCount };
 }
-```
-- Uses regex to extract counts from text like `"1.2K reactions · 45 comments"`.
-- `([\d,\.]+\s*[Kk]?)` captures: digits, commas, dots, optional space + optional K/k (e.g. `"1.2K"`, `"45"`, `"1,234"`).
-- `\s+reactions?/i`: matches "reaction" or "reactions", case-insensitive.
 
-```js
 function parseCount(str = '') {
   const s = str.replace(/,/g, '').trim().toUpperCase();
+  if (s.includes('M')) return Math.round(parseFloat(s) * 1_000_000);
   if (s.includes('K')) return Math.round(parseFloat(s) * 1000);
   return parseInt(s) || 0;
 }
 ```
-- Removes commas (e.g., `"1,234"` → `"1234"`).
-- If contains `K` (e.g., `"1.2K"`): `parseFloat("1.2K") * 1000` → `1200`.
-- Otherwise: plain `parseInt`.
-- `|| 0`: defaults to 0 if parsing fails.
 
-### 👤 `isRealAuthorName(name)` — Filter Fake Names
+- Regex matches `"1.2K reactions"`, `"45 comments"`, `"1,234 likes"`, `"2M reactions"` etc.
+- `parseCount` handles **M (millions)**, **K (thousands)**, commas, and decimals.
+- Returns `{ reactionCount: 0, commentCount: 0 }` if the card text doesn't contain these strings (e.g., brand-new post with no engagement yet).
+
+---
+
+### 👤 `isRealAuthorName(name)` — Filter LinkedIn UI Noise
 
 ```js
 function isRealAuthorName(name = '') {
   if (!name || name.length < 3 || name.length > 80) return false;
   const fakePatterns = [
-    /^feed post/i, /^linkedin member/i, /^unknown/i,
+    /^feed post/i, /^linkedin member/i, /^unknown/i, /^post number/i,
     /^sponsored/i, /^promoted/i, /^\d+$/,
-    /^see more/i, /^following/i, /^like$/i, ...
+    /^see more/i, /^following/i, /^follow$/i, /^connect$/i,
+    /^message$/i, /^like$/i, /^comment$/i, /^share$/i, /^send$/i,
+    /^suggested$/i, /^people you may know$/i, /^news$/i, /^advertisement$/i,
+    /\bcommented on\b/i, /\blikes? this\b/i, /\bshared this\b/i,
+    /\breacted to\b/i, /\breposted this\b/i,
   ];
-  if (fakePatterns.some((re) => re.test(lower))) return false;
+  if (fakePatterns.some((re) => re.test(name.toLowerCase()))) return false;
   if (!/[a-zA-Z]/.test(name)) return false;
   return true;
 }
 ```
-LinkedIn's DOM contains many accessibility labels and UI text that look like "names" but aren't. This function validates that an extracted name is actually a person name:
-- Length 3–80 chars.
-- Doesn't match known fake patterns (feed labels, action button texts).
-- Contains at least one letter.
 
-### 📋 `parseAuthorFromLines(lines)` — Extract Author from Card Text
+LinkedIn's DOM contains many accessibility labels and action-button texts. This guard ensures only genuine human/company names are accepted as authors. Validates:
+1. Length 3–80 characters.
+2. Does not match any known fake pattern.
+3. Contains at least one letter (not a pure number or symbol).
+
+---
+
+### 📋 `parseAuthorFromLines(lines)` — Extract Author Name, Headline, Post Text
 
 ```js
 function parseAuthorFromLines(lines) {
   for (let i = 0; i < Math.min(lines.length, 15); i++) {
     const ln = lines[i];
-    const wc = ln.split(/\s+/).filter(Boolean).length;  // word count
-```
-Scans the first 15 lines of a post card's text content to find the author name and headline. `wc` counts words by splitting on whitespace and counting non-empty parts.
+    const wc = ln.split(/\s+/).filter(Boolean).length;
 
-```js
     if (!ln || ln.length > 80 || ln.includes('http')) {
-      if (authorName) break;   // stop if we already found the name
-      continue;                // skip this line
+      if (authorName) break;  // stop if name already found
+      continue;
     }
-```
-Skips blank lines, long lines (>80 chars), and URLs. If we already found the author name and hit a weird line, stop searching.
-
-```js
-    if (!authorName) {
-      if (wc >= 1 && wc <= 8 && isRealAuthorName(ln)) {
-        authorName = ln;    // found the name (1-8 word line that passes the real-name test)
-        bodyStart  = i + 1; // post body starts on next line
-      }
+    if (!authorName && wc >= 1 && wc <= 8 && isRealAuthorName(ln)) {
+      authorName = ln;        // First short valid line = author name
+      bodyStart  = i + 1;
     } else if (!authorHeadline && wc <= 14) {
-      authorHeadline = ln;  // next short line after name = headline
+      authorHeadline = ln;    // Next short line = job headline
       bodyStart = i + 1;
     } else {
-      break;                // stop once we have name + headline
+      break;
     }
-```
-- First 1–8 word valid name → set as `authorName`.
-- Next line ≤14 words → set as `authorHeadline`.
-- Stop after finding both.
-
-```js
+  }
   const postText = lines.slice(bodyStart).join(' ').trim();
-  return { authorName: authorName || 'Unknown', authorHeadline, postText };
+  const isConnection = authorHeadline.toLowerCase().includes('1st') ||
+                       lines.slice(0, 3).some(l => l.toLowerCase().includes('1st'));
+  return { authorName: authorName || 'Unknown', authorHeadline, postText, isConnection };
 }
 ```
-Everything after the name/headline lines is joined as the post body text.
+
+Parses the raw card text (which is just a flat string of lines) into structured fields:
+- Scans only the **first 15 lines** (performance — author/headline always appear at the top).
+- `authorName`: first line with 1–8 words that passes `isRealAuthorName()`.
+- `authorHeadline`: next line with ≤14 words (LinkedIn headlines are concise).
+- `postText`: everything after those two lines joined into one string.
+- `isConnection`: heuristically detected by the presence of `"1st"` (LinkedIn's 1st-degree badge).
 
 ---
 
 ### 🔎 Three Post Collection Strategies
 
-The bot uses 3 different DOM strategies and stops at the first one that finds posts. This provides fallback reliability if LinkedIn changes its HTML structure.
+The bot tries strategies in order, stopping at the **first one that finds posts**. This makes scraping resilient to LinkedIn's frequent DOM changes.
 
-#### Strategy A+B: `collectByLinkWalk(page)` — Follow Post Links
+---
+
+#### Strategy A/B: `collectByLinkWalk(page)` — Follow Post Anchor Tags
 
 ```js
 const anchors = new Set([
@@ -427,37 +595,60 @@ const anchors = new Set([
   ...document.querySelectorAll('a[href*="activity"]'),
 ]);
 ```
-Finds ALL anchor tags whose `href` contains known LinkedIn post URL patterns. Uses a `Set` to automatically deduplicate (same link found multiple times in DOM).
+
+Finds all anchor tags with known LinkedIn post URL patterns. Uses a `Set` for automatic deduplication (the same link often appears multiple times in the DOM as timestamp, image, and text links all point to the same post).
 
 ```js
-if (/\/(company|jobs|learning|messaging|notifications|mynetwork)\//.test(href)) continue;
+if (/\/(company|jobs|learning|messaging|notifications|mynetwork|groups)\//.test(href)) continue;
 ```
-Skips links to other LinkedIn sections that aren't posts (companies, job listings, messages, etc.).
+Skips navigation links to other LinkedIn sections.
 
 ```js
 let el = anchor.parentElement;
-let cardText = '';
 for (let d = 0; d < 25 && el && el.tagName !== 'BODY'; d++) {
   const t = (el.innerText || '').trim();
   if (t.length >= 150 && t.length <= 30000) { cardText = t; break; }
   el = el.parentElement;
 }
 ```
-Walks UP the DOM tree from the link (up to 25 levels) to find the post card container. The card is identified by having 150–30,000 characters of text (too small = not a post, too large = entire page).
+Walks **up** the DOM tree (up to 25 levels) to find the post card container, identified by having 150–30,000 characters of text.
 
-#### Strategy C: `collectByDataUrn(page)` — Use LinkedIn's Data Attributes
+**Additional data collected per post (both strategies A/B and C):**
+- `postFormat` — `text`, `image`, `video`, `audio`, `carousel`, `poll` (via DOM class selectors)
+- `commentsData` — text of up to 3 visible comments (for engagement pod detection)
+- `authorReplied` — whether the post author has already replied in the thread
+- `postAge` — text content of `.update-components-actor__sub-description` (e.g., `"2h • Edited"`)
+- `profileUrl` — the author's `/in/` or `/company/` profile link
 
+---
+
+#### Strategy C: `collectByDataUrn(page)` — LinkedIn Data Attributes + Base64 Decoding
+
+Primary selector:
 ```js
-const elems = document.querySelectorAll('[data-urn*="activity"],[data-id*="activity"],[data-entity-urn]');
-for (const el of elems) {
-  const urn = el.getAttribute('data-urn') || el.getAttribute('data-id') || el.getAttribute('data-entity-urn') || '';
-  const match = urn.match(/activity[:\-](\d+)/);
-  if (!match) continue;
-  const postUrl = `https://www.linkedin.com/feed/update/urn:li:activity:${match[1]}/`;
+const elems = document.querySelectorAll(
+  '[data-urn*="activity"],[data-id*="activity"],[data-entity-urn],' +
+  '[data-view-name="feed-full-update"],' +
+  '[role="listitem"][componentkey*="FeedType_"]'
+);
 ```
-LinkedIn embeds post identifiers in custom `data-urn` or `data-entity-urn` HTML attributes. This strategy extracts the numeric activity ID from URNs like `urn:li:activity:7234567890` and builds the post URL.
 
-#### Strategy D: `collectByBodyText(page)` — Parse Raw Page Text
+LinkedIn embeds post identifiers in HTML attributes. This strategy reads them directly. For LinkedIn's **new layout** (which no longer uses `data-urn` attributes), it uses a multi-step `extractPostUrl(el)` function:
+
+1. **New layout `componentkey`:** `componentkey="expanded<base64>FeedType_..."` → decode base64 to get activity ID
+2. **Inner card `componentkey`:** bare base64url string 30–60 chars → decode
+3. **Plaintext URN in HTML:** `urn:li:activity:\d{15,}` → extract directly
+4. **URL-encoded URN:** `urn%3Ali%3Aactivity%3A\d{15,}` → decode and extract
+5. **Inner child componentkeys:** scan child elements for base64 patterns
+6. **Legacy `data-testid`:** `data-testid="<base64>-commentLists"` → decode base64
+
+**`decodeUrnBase64(b64url)`** — Two decode strategies:
+- **Strategy A (protobuf varint):** Tries reading a protobuf variable-length integer at byte offsets 0–11. A valid LinkedIn snowflake ID is in range `6e18–9.99e18`.
+- **Strategy B (fixed-int64 window):** Slides an 8-byte window across the decoded bytes, reading both little-endian and big-endian int64 values — covers LinkedIn's `proto fixed64` field encoding.
+
+---
+
+#### Strategy D: `collectByBodyText(page)` — Raw Page Text Fallback
 
 ```js
 const bodyText = await page.evaluate(() => document.body.innerText || '');
@@ -465,12 +656,16 @@ const chunks  = bodyText.split(/\n{2,}/);
 for (const chunk of chunks) {
   if (trimmed.length < 120 || trimmed.length > 5000) continue;
   if (trimmed.split(/\s+/).length < 10) continue;
-  const lower = trimmed.toLowerCase();
-  if (/^(home|my network|jobs|messaging|notifications|search)/.test(lower)) continue;
+  if (/^(home|my network|jobs|messaging|notifications|search|suggested)/.test(lower)) continue;
+  // ... parse with parseAuthorFromLines
+}
 ```
-Last resort: reads ALL visible text from the page and splits it into chunks by double newlines. Filters out short chunks, nav labels, and huge blocks. Less precise (no URLs), only used if strategies A–C fail.
 
-### 🔄 `dedup(posts)` — Remove Duplicates
+Last resort — reads all visible text from the page and splits it into paragraphs by double newlines. Much less precise (no post URLs), but works even if LinkedIn's HTML structure changes completely.
+
+---
+
+### 🔄 `dedup(posts)` — Remove Duplicate Posts
 
 ```js
 function dedup(posts) {
@@ -481,187 +676,124 @@ function dedup(posts) {
     if (seenText.has(textKey)) return false;
     seenText.add(textKey);
     if (p.postUrl) {
-      if (seenUrls.has(p.postUrl)) return false;
-      seenUrls.add(p.postUrl);
+      const id = extractPostId(p.postUrl);
+      if (seenUrls.has(id)) return false;
+      seenUrls.add(id);
     }
     return true;
   });
 }
 ```
-Removes posts that appear more than once. Two deduplication methods:
-1. **URL dedup**: Same URL → same post. Uses a `Set` which provides O(1) lookup.
-2. **Text dedup**: First 60 chars of post text as a key. Catches cases where the same post appears with slightly different URLs.
+
+Two-pass deduplication:
+1. **Text key:** First 60 characters of post text — catches duplicates with different URLs (reshares, etc.).
+2. **URL ID:** Extracts the numeric activity ID from the URL via `extractPostId()` (from `src/data/csv.js`) — catches the same post with different URL parameters.
 
 ---
 
-### 🏆 `findOneInterestingPost(page, commentedUrls, recentAuthors)` — Main Selector
+### 🏆 `findOneInterestingPost(page, commentedUrls, recentAuthors, thresholds)` — Main Selector
 
 ```js
-async function findOneInterestingPost(page, commentedUrls = new Set(), recentAuthors = new Set()) {
-  await ensureOnFeed(page);
-  await scrollFeed(page, 10);
+async function findOneInterestingPost(
+  page,
+  commentedUrls  = new Set(),
+  recentAuthors  = new Set(),
+  thresholds     = [80, 70, 60]
+) {
 ```
-First ensures we're on the feed and loads more posts by scrolling.
+
+**Parameters:**
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `page` | Playwright Page | The browser page |
+| `commentedUrls` | `Set<string>` | Post IDs already commented on (from CSV) |
+| `recentAuthors` | `Set<string>` | Lowercase author names commented on in last 7 days |
+| `thresholds` | `number[]` | Fallback score thresholds — tries highest first |
+
+**Step-by-step flow:**
 
 ```js
-  const strategies = [
-    { name: 'Link-walk (/posts/ + /feed/update/)', fn: () => collectByLinkWalk(page) },
-    { name: 'data-urn walk',                       fn: () => collectByDataUrn(page) },
-    { name: 'body.innerText parse',                fn: () => collectByBodyText(page) },
-  ];
+await ensureOnFeed(page);
+await scrollFeed(page, 10);
+```
+Step 1: Navigate to feed, scroll 10 passes to load posts.
 
+```js
+for (const { name, fn } of strategies) {
+  const found = await fn();
+  if (found.length > 0) { posts = found; break; }
+}
+```
+Step 2: Try strategies A → B → C in order. Stop at first success.
+
+```js
+posts = dedup(posts);
+const total = posts.length;
+```
+Step 3: Deduplicate. Record total (needed for recency score ratio).
+
+```js
+for (let i = 0; i < posts.length; i++) {
+  if (!post.postUrl) { /* skip */ continue; }
+  if (commentedUrls.has(postId)) { /* skip */ continue; }
+  const { skip } = shouldSkip(post.authorName, post.authorHeadline, post.postText);
+  if (skip) continue;
+  if (recentAuthors.has(post.authorName?.toLowerCase())) continue; // 7-day cooldown
+```
+Step 4: For each post, apply all gates:
+1. Must have a valid URL.
+2. Must not be in `commentedUrls` (already interacted).
+3. Must pass all `shouldSkip()` hard filters.
+4. Author must not be in `recentAuthors` (7-day cooldown — prevents repeated engagement with same person).
+
+```js
+  const { total: score, breakdown } = compositeScore({
+    postText, authorHeadline, reactionCount, commentCount,
+    positionIndex: i, totalPosts: total,
+  });
+  if (score >= thresholds[thresholds.length - 1]) {
+    candidates.push({ ...post, compositeScore: score, breakdown });
+  }
+```
+Step 5: Score each candidate. Add to `candidates` if score ≥ the minimum threshold (`thresholds` last element = lowest fallback).
+
+```js
+// Find the highest threshold that has at least one candidate
+let activeThreshold = thresholds[thresholds.length - 1];
+for (const t of thresholds) {
+  if (candidates.some(c => c.compositeScore >= t)) { activeThreshold = t; break; }
+}
+const validCandidates = candidates.filter(c => c.compositeScore >= activeThreshold);
+validCandidates.sort((a, b) => b.compositeScore - a.compositeScore);
+const winner = validCandidates[0];
+```
+Step 6: **Dynamic threshold selection** — tries the highest threshold (e.g., 80) first. If no candidate meets it, falls back to 70, then 60. This ensures the bot always picks the best available post, tightening standards when high-quality posts are available and relaxing them gracefully when they aren't.
+
+Step 7: Sort survivors descending by score. Return the winner (index 0 = highest).
+
+---
+
+### 🔄 `getFeedPostsBatch(page, passes)` — Batch Extractor for the Main Loop
+
+```js
+async function getFeedPostsBatch(page, passes = 5) {
+  await ensureOnFeed(page);
+  await scrollFeed(page, passes);
+
+  // Run ALL strategies, aggregate results (not first-wins)
   for (const { name, fn } of strategies) {
     const found = await fn();
-    if (found.length > 0) { posts = found; break; }
+    posts = posts.concat(found); // combine all
   }
-```
-Tries each strategy in order, stops at the first one that returns posts. If all return 0, exits with `null`.
 
-```js
-  posts = dedup(posts);
-  const total = posts.length;
-```
-Deduplicates and stores the total count (used for recency score calculation).
-
-```js
-  for (let i = 0; i < posts.length; i++) {
-    const post = posts[i];
-
-    if (!post.postUrl) { continue; }                          // must have a URL
-    if (commentedUrls.has(post.postUrl)) { continue; }        // already commented
-    const { skip, reason } = shouldSkip(post.authorName, post.authorHeadline, post.postText);
-    if (skip) { continue; }                                   // failed hard filter
-
-    if (recentAuthors.has((post.authorName || '').toLowerCase())) { continue; }  // 7-day cooldown
-```
-For each candidate post, applies all gates in sequence:
-1. Must have a URL (Strategy D posts may not have one).
-2. URL must not be in the `commentedUrls` set (already interacted).
-3. Must pass the `shouldSkip()` hard content/author filters.
-4. Author must not be in `recentAuthors` (7-day cooldown — avoid spamming the same person).
-
-```js
-    const { reactionCount, commentCount } = parseEngagement(post.cardText || '');
-    const { total: score, breakdown, shouldComment } = compositeScore({
-      postText: post.postText,
-      authorHeadline: post.authorHeadline,
-      reactionCount,
-      commentCount,
-      positionIndex: i,
-      totalPosts: total,
-    });
-```
-Parses engagement from the card text and calculates the full composite score.
-
-```js
-    const mark = shouldComment ? '[✓]' : '[✗]';
-    console.log(`  ${mark} ${nameStr} | score:${score} (H:${breakdown.heuristic} E:${breakdown.engagement} S:${breakdown.seniority} N:${breakdown.niche} R:${breakdown.recency}) | ${engStr}`);
-
-    if (shouldComment) {
-      candidates.push({ ...post, reactionCount, commentCount, compositeScore: score, breakdown });
-    }
-```
-Logs every evaluated post with its full score breakdown. The `mark` shows `[✓]` (passes) or `[✗]` (too low score). Only posts with `shouldComment: true` (score ≥ 30) are added to `candidates`.
-
-```js
-  candidates.sort((a, b) => b.compositeScore - a.compositeScore);
-  const winner = candidates[0];
-```
-Sorts candidates by descending score (highest first). Takes the best one. The `sort()` comparator `b - a` produces descending order.
-
----
-
-## 📁 `src/linkedin/commenter.js` — Posts the Comment
-
-### `postComment(page, postUrl, commentText)` — 7-Step Comment Flow
-
-```js
-await page.goto(postUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-await page.waitForTimeout(3000);
-const url = page.url();
-if (url.includes('/login') || url.includes('/checkpoint')) { return false; }
-```
-**Step 1 – Navigate:** Goes to the post URL. After loading, checks if LinkedIn redirected to a login/checkpoint page (session expired). Returns `false` to abort.
-
-```js
-for (let i = 0; i < 4; i++) {
-  await page.evaluate(() => window.scrollBy(0, 300));
-  await page.waitForTimeout(400);
+  return dedup(posts);
 }
 ```
-**Step 2 – Scroll:** Scrolls down gently to reveal the action bar (Like, Comment, Share buttons) which may be below the fold.
 
-```js
-const likeSelectors = [
-  'button[aria-label*="React Like"][aria-pressed="false"]',
-  'button[aria-label="Like"][aria-pressed="false"]',
-];
-for (const sel of likeSelectors) {
-  const btn = page.locator(sel).first();
-  if (await btn.isVisible({ timeout: 1500 }).catch(() => false)) {
-    await btn.click();
-    break;
-  }
-}
-```
-**Step 3 – Like:** Tries multiple CSS selectors to find a "Like" button that hasn't been pressed yet (`aria-pressed="false"`). If found and visible, clicks it. The `.catch(() => false)` prevents errors if the selector times out.
-
-```js
-const boxSelectors = [
-  '.ql-editor[contenteditable="true"]',
-  '[contenteditable="true"][data-placeholder*="comment" i]',
-];
-```
-**Step 4 – Find comment box:** LinkedIn uses a Quill rich text editor for comments. Tries known CSS selectors. The `.ql-editor` class is Quill's stable class name.
-
-```js
-await commentBox.click();
-await page.keyboard.press('Control+a');
-await page.keyboard.press('Delete');
-await commentBox.type(commentText, { delay: 50 + Math.random() * 40 });
-```
-**Step 5 – Type:** Clicks the box, selects all (Ctrl+A), deletes (Clear), then types the comment with a realistic per-character delay (50–90ms). `element.type()` triggers React's `onChange` event — necessary because LinkedIn uses React to manage the input state.
-
-```js
-const submitSelectors = [
-  'button[aria-label="Comment"]',
-  'button[aria-label="Post comment"]',
-  'button.comments-comment-box__submit-button',
-  'button:has-text("Comment")',
-  'button:has-text("Post")',
-];
-for (const sel of submitSelectors) {
-  const btn = page.locator(sel).last();
-  if (await btn.isVisible({ timeout: 2000 })) {
-    await btn.click();
-    submitted = true;
-    break;
-  }
-}
-```
-**Step 6 – Submit:** Tries multiple selectors to find the blue "Comment" submit button. Uses `.last()` because Playwright's `:has-text("Comment")` might match multiple elements — the last one is typically the most specific (innermost in the DOM).
-
-```js
-const errorDismissed = await page.evaluate(() => {
-  const dialogs = [...document.querySelectorAll('[role="alertdialog"]')];
-  for (const d of dialogs) {
-    if (d.innerText.toLowerCase().includes('error') || d.innerText.includes('something went wrong')) {
-      const btn = d.querySelector('button');
-      if (btn) btn.click();
-      return true;
-    }
-  }
-  return false;
-});
-```
-**Step 7 – Error check:** After submission, looks for LinkedIn dialog boxes with error messages (rate limiting, technical errors). If found, dismisses them by clicking the button inside the dialog.
-
-```js
-const snippet = commentText.slice(0, 40).toLowerCase();
-const pageText = await page.evaluate(() => document.body.innerText.toLowerCase());
-if (pageText.includes(snippet)) { return true; }
-```
-**Verification:** Checks if the first 40 characters of the comment text now appear in the page — confirming the comment was posted. If the submit button was clicked but the text isn't visible yet (page not refreshed), still returns `true`.
+Unlike `findOneInterestingPost` which stops at the first successful strategy, `getFeedPostsBatch`:
+- Runs **all three strategies** and combines their results.
+- Returns the full deduplicated batch **without scoring or filtering** — scoring is done by the calling orchestrator in `bot.js`.
+- Used by `bot.js`'s main loop to get a large pool of posts, then evaluate them sequentially.
 
 ---
 
@@ -670,48 +802,62 @@ if (pageText.includes(snippet)) { return true; }
 ```
 bot.js: main()
   │
-  ├── Step 1: Load commentedUrls (CSV) + recentAuthors (7-day filter)
+  ├── Load commentedUrls (CSV) + recentAuthors (7-day CSV filter)
   │
-  ├── Step 2: findOneInterestingPost(page, commentedUrls, recentAuthors)
+  ├── getFeedPostsBatch() OR findOneInterestingPost()
+  │     ├── ensureOnFeed()            → navigate to /feed/
+  │     ├── scrollFeed(10 passes)     → load posts into DOM (End key every 3rd pass)
   │     │
-  │     ├── ensureOnFeed()        → navigate to /feed/
-  │     ├── scrollFeed(10 passes) → load posts into DOM
-  │     │
-  │     ├── Strategy A: collectByLinkWalk()  → find /posts/ and /feed/update/ links
-  │     ├── Strategy B: collectByDataUrn()   → find data-urn="activity:..." elements
-  │     └── Strategy C: collectByBodyText()  → parse raw page text as fallback
+  │     ├── Strategy A: collectByLinkWalk()    → /posts/ and /feed/update/ anchors
+  │     ├── Strategy B: collectByDataUrn()     → data-urn / componentkey + base64 decode
+  │     └── Strategy C: collectByBodyText()    → raw page text fallback
   │           │
-  │           └── dedup() → remove duplicate posts
+  │           └── dedup() → deduplicate by URL-ID + text prefix
   │
   ├── For each unique post:
   │     ├── ❌ Skip if no URL
   │     ├── ❌ Skip if already commented (commentedUrls)
-  │     ├── ❌ Skip if shouldSkip() → OTW / student / job post / grief
-  │     ├── ❌ Skip if author in 7-day cooldown
+  │     ├── ❌ Skip if shouldSkip() → OTW / student / job post / grief / UI label / short text
+  │     ├── ❌ Skip if author in 7-day cooldown (recentAuthors)
   │     │
-  │     └── ✅ compositeScore() → calculate 0-100 score
-  │               H(40%) + E(25%) + S(15%) + N(10%) + R(10%)
+  │     └── ✅ compositeScore()   →   0-100 weighted score
+  │          ┌──────────────────────────────────────────────┐
+  │          │ H(35%) Heuristic  + E(15%) Engagement        │
+  │          │ + V(15%) Visibility + S(15%) Seniority        │
+  │          │ + N(10%) Niche + R(10%) Recency               │
+  │          └──────────────────────────────────────────────┘
   │
-  ├── Sort candidates by score (highest first)
+  ├── Dynamic threshold: try 80 → 70 → 60 (first with ≥1 match wins)
+  ├── Filter by active threshold
+  ├── Sort descending by score
   └── Return winner (highest-scored post)
-
-  ↓
-
-  postComment(page, winner.postUrl, generatedComment)
-    ├── Navigate to post URL
-    ├── Like the post
-    ├── Open comment box
-    ├── Type comment (human-like delays)
-    ├── Submit via button
-    └── Verify text appears on page
 ```
+
+---
 
 ## 📊 Score Threshold Reference
 
 | Score | Meaning |
 |-------|---------|
-| 0–29 | Skip — not worth engaging |
+| 0–29  | Skip — not worth engaging |
 | 30–49 | Acceptable — will comment if no better option |
 | 50–69 | Good post — relevant content, decent author |
 | 70–84 | Strong post — senior author, niche-relevant, great engagement |
-| 85–100 | Ideal — founder/CEO, your exact niche, sweet-spot engagement |
+| 85–100| Ideal — founder/CEO, your exact niche, sweet-spot engagement |
+
+**Dynamic thresholds** (`[80, 70, 60]` default): The bot tries to find a post scoring 80+, falls back to 70+, then 60+. This means the bot picks the best available post on every run rather than always applying a single fixed bar.
+
+---
+
+## 📌 Key Design Decisions Summary
+
+| Decision | Rationale |
+|----------|-----------|
+| 3 DOM strategies with fallback | LinkedIn frequently changes its HTML; resilience through redundancy |
+| Hard filters run before scoring | Avoids wasting CPU cycles computing scores for invalid posts |
+| 7-day author cooldown checked inside loop | Falls through to next candidate rather than aborting the entire run |
+| Log scale for engagement | Prevents viral posts with 50k reactions from dominating linearly |
+| Visibility as separate dimension | Decoupled from raw engagement — you can have high reactions but poor comment visibility |
+| Dynamic threshold array | Adapts quality bar to what's actually available in each feed batch |
+| `postAge` string from DOM | Provides real-time recency signal beyond just feed position proxy |
+| Base64 + protobuf decode for URNs | Handles LinkedIn's new `componentkey` layout that no longer uses `data-urn` |
