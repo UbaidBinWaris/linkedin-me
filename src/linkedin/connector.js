@@ -1,219 +1,192 @@
 'use strict';
 /**
- * connector.js — LinkedIn Connection Request Playwright Module
+ * connector.js — LinkedIn Connection Request (Playwright)
  *
- * Handles navigating to a profile and clicking Connect + optional note.
+ * Strategy (LinkedIn 2026):
+ *   1. Navigate to the person's profile page.
+ *   2. Click the "Connect" button (or find it inside the "More" menu).
+ *   3. A modal dialog opens — click "Add a note", type note, click Send.
+ *   4. If no note needed, click "Send without a note" directly.
  *
  * EXPORTS:
- *   sendConnectionRequest(page, profileUrl, note, dryRun)
- *     → { sent: bool, skipped: bool, reason: string }
+ *   sendConnectionRequest(page, profileUrl, note, dryRun, inviteUrl?)
  */
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// ─────────────────────────────────────────────────────────────────
-//  HELPERS
-// ─────────────────────────────────────────────────────────────────
 
 function randomBetween(min, max) {
   return min + Math.floor(Math.random() * (max - min + 1));
 }
 
-async function humanDelay(min = 1500, max = 3500) {
-  await sleep(randomBetween(min, max));
+// ─────────────────────────────────────────────────────────────────
+//  Extract vanity name from profile URL
+// ─────────────────────────────────────────────────────────────────
+function extractVanityName(profileUrl) {
+  const m = profileUrl.match(/linkedin\.com\/in\/([^/?#]+)/);
+  return m ? m[1] : null;
 }
 
-/**
- * Types text character by character to mimic human typing.
- */
-async function humanType(page, selector, text) {
-  await page.click(selector);
-  await sleep(300);
-  for (const char of text) {
-    await page.keyboard.type(char, { delay: randomBetween(40, 110) });
+// ─────────────────────────────────────────────────────────────────
+//  Fill note textarea (after modal is open)
+// ─────────────────────────────────────────────────────────────────
+async function fillNote(page, note) {
+  const sel = [
+    'textarea#custom-message',
+    'textarea[name="message"]',
+    'textarea[aria-label*="note" i]',
+    'textarea[aria-label*="message" i]',
+    'textarea[placeholder*="note" i]',
+    'textarea[placeholder*="Add" i]',
+    'textarea',
+  ].join(', ');
+
+  const ta = page.locator(sel).first();
+  if (!(await ta.isVisible({ timeout: 5000 }).catch(() => false))) return false;
+
+  await ta.click();
+  await sleep(200);
+  await page.keyboard.press('Control+a');
+  await sleep(100);
+  await page.keyboard.press('Backspace');
+  await sleep(100);
+  for (const ch of note) {
+    await page.keyboard.type(ch, { delay: randomBetween(30, 70) });
   }
+  await sleep(400);
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  NAVIGATION
+//  Click the final Send button inside the modal
 // ─────────────────────────────────────────────────────────────────
+async function clickSend(page) {
+  const patterns = [
+    'button[aria-label="Send invitation"]',
+    'button[aria-label="Send now"]',
+    'button[aria-label="Send without a note"]',
+    'button[aria-label="Done"]',
+    'button:has-text("Send invitation")',
+    'button:has-text("Send now")',
+    'button:has-text("Send without a note")',
+    'button:has-text("Send")',
+    'button:has-text("Done")',
+    'input[type="submit"]',
+  ];
 
-/**
- * Navigate to a LinkedIn profile page and wait for it to load.
- * Returns false if navigation fails.
- */
-async function navigateToProfile(page, profileUrl) {
-  try {
-    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await sleep(2500);
+  for (const sel of patterns) {
+    try {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await btn.click();
+        console.log(`    ✓ Send clicked via: ${sel}`);
+        await sleep(2000);
+        return true;
+      }
+    } catch { /* try next */ }
+  }
+
+  // DOM fallback — search all visible buttons for send-like text
+  const clicked = await page.evaluate(() => {
+    const keywords = ['send invitation', 'send now', 'send without a note', 'send', 'done'];
+    const btns = [...document.querySelectorAll('button')];
+    for (const btn of btns) {
+      if (btn.disabled || btn.offsetParent === null) continue;
+      const text = ((btn.innerText || '') + ' ' + (btn.getAttribute('aria-label') || '')).toLowerCase().trim();
+      if (keywords.some((k) => text === k || text.startsWith(k))) {
+        btn.click();
+        return btn.innerText || btn.getAttribute('aria-label') || 'unknown';
+      }
+    }
+    return null;
+  }).catch(() => null);
+
+  if (clicked) {
+    console.log(`    ✓ Send clicked via DOM fallback: "${clicked}"`);
+    await sleep(2000);
     return true;
-  } catch (e) {
-    return false;
   }
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  CONNECT BUTTON RESOLUTION
+//  Click the Connect button on the profile page
+//  Returns true if a Connect button was found and clicked
 // ─────────────────────────────────────────────────────────────────
+async function clickConnectOnProfile(page) {
+  // Primary: direct Connect button visible on profile header
+  const directPatterns = [
+    'button[aria-label*="Invite" i][aria-label*="connect" i]',
+    'button[aria-label="Connect"]',
+    'button:has-text("Connect")',
+  ];
 
-/**
- * Resolves the Connect button on a profile page.
- *
- * LinkedIn shows Connect in three possible locations:
- *   1. Directly in the top card actions (most common)
- *   2. Inside a "More" dropdown menu
- *   3. As a "Follow" button when already following — Connect hidden in More
- *
- * Returns the button handle (locator) or null if not found.
- */
-async function findConnectButton(page) {
-  // Strategy 1: top-card direct Connect button
-  const topCardConnect = page.locator(
-    'button.pvs-profile-actions__action:has-text("Connect"), ' +
-    'button[aria-label*="Invite"][aria-label*="to connect"], ' +
-    'button.artdeco-button:has-text("Connect")'
-  ).first();
-
-  if (await topCardConnect.isVisible({ timeout: 3000 }).catch(() => false)) {
-    return topCardConnect;
+  for (const sel of directPatterns) {
+    try {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await btn.click();
+        console.log(`    ↳ Clicked Connect via: ${sel}`);
+        await sleep(1500);
+        return true;
+      }
+    } catch { /* try next */ }
   }
 
-  // Strategy 2: "More" overflow button → dropdown → Connect option
-  const moreBtn = page.locator(
-    'button[aria-label="More actions"], ' +
-    'button.pvs-profile-actions__overflow-toggle, ' +
-    'button:has-text("More")'
-  ).first();
+  // Secondary: Connect might be hidden inside the "More" / "…" overflow menu
+  const morePatterns = [
+    'button[aria-label="More actions"]',
+    'button[aria-label*="More" i]',
+    'button:has-text("More")',
+  ];
 
-  if (await moreBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-    await moreBtn.click();
-    await sleep(800);
+  for (const sel of morePatterns) {
+    try {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await btn.click();
+        console.log(`    ↳ Opened More menu via: ${sel}`);
+        await sleep(800);
 
-    const dropdownConnect = page.locator(
-      'div[role="listitem"] span:text-is("Connect"), ' +
-      'li.artdeco-dropdown__item:has-text("Connect")'
-    ).first();
+        // Now look for Connect inside the dropdown
+        const menuConnect = page.locator(
+          'li:has-text("Connect"), [role="menuitem"]:has-text("Connect"), span:has-text("Connect")'
+        ).first();
+        if (await menuConnect.isVisible({ timeout: 2000 }).catch(() => false)) {
+          await menuConnect.click();
+          console.log('    ↳ Clicked Connect inside More menu');
+          await sleep(1500);
+          return true;
+        }
 
-    if (await dropdownConnect.isVisible({ timeout: 2000 }).catch(() => false)) {
-      return dropdownConnect;
-    }
+        // Close the menu if Connect not found
+        await page.keyboard.press('Escape');
+        await sleep(400);
+      }
+    } catch { /* try next */ }
   }
 
-  return null;
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  NOTE DIALOG
+//  Check already connected / pending  (profile-page check)
 // ─────────────────────────────────────────────────────────────────
-
-/**
- * Fills and submits the "Add a note" dialog.
- * Returns true if note was sent successfully.
- */
-async function sendWithNote(page, note) {
-  try {
-    // Click "Add a note" button in the Connect dialog
-    const addNoteBtn = page.locator(
-      'button[aria-label="Add a note"], ' +
-      'button:has-text("Add a note")'
-    ).first();
-
-    if (!(await addNoteBtn.isVisible({ timeout: 4000 }).catch(() => false))) {
-      console.log('    [WARN] "Add a note" button not found. Sending without note.');
-      return false;
-    }
-
-    await addNoteBtn.click();
-    await sleep(700);
-
-    // Fill the textarea
-    const textarea = page.locator('textarea#custom-message, textarea[name="message"]').first();
-    if (!(await textarea.isVisible({ timeout: 3000 }).catch(() => false))) {
-      console.log('    [WARN] Note textarea not found. Sending without note.');
-      return false;
-    }
-
-    // Clear and type note
-    await textarea.click();
-    await sleep(300);
-    await page.keyboard.selectAll();
-    await page.keyboard.press('Backspace');
-    await sleep(200);
-
-    // Type character by character
-    for (const char of note) {
-      await page.keyboard.type(char, { delay: randomBetween(35, 95) });
-    }
-    await sleep(600);
-
-    // Click Send
-    const sendBtn = page.locator(
-      'button[aria-label="Send invitation"], ' +
-      'button:has-text("Send")'
-    ).first();
-
-    if (!(await sendBtn.isVisible({ timeout: 3000 }).catch(() => false))) {
-      console.log('    [WARN] Send button not found after typing note.');
-      return false;
-    }
-
-    await sendBtn.click();
-    await sleep(1200);
-    return true;
-
-  } catch (e) {
-    console.log(`    [WARN] Note dialog error: ${e.message.slice(0, 80)}`);
-    return false;
-  }
-}
-
-/**
- * Send without a note — clicks the plain "Send" or "Send without a note" button.
- */
-async function sendWithoutNote(page) {
-  try {
-    const sendBtn = page.locator(
-      'button[aria-label="Send without a note"], ' +
-      'button:has-text("Send without a note"), ' +
-      'button[aria-label="Send invitation"], ' +
-      'button:has-text("Send")'
-    ).first();
-
-    if (!(await sendBtn.isVisible({ timeout: 4000 }).catch(() => false))) {
-      return false;
-    }
-
-    await sendBtn.click();
-    await sleep(1000);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────
-//  CHECK IF ALREADY CONNECTED / PENDING
-// ─────────────────────────────────────────────────────────────────
-
 async function isAlreadyConnectedOrPending(page) {
   try {
-    // "Message" button in the top card → already 1st degree
-    const msgBtn = page.locator(
-      'button.pvs-profile-actions__action:has-text("Message"), ' +
-      'a[href*="/messaging/thread/"]:has-text("Message")'
+    const msg = page.locator(
+      'button:has-text("Message"), a:has-text("Message"), ' +
+      'button[aria-label*="Message" i], a[aria-label*="Message" i]'
     ).first();
-    if (await msgBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+    if (await msg.isVisible({ timeout: 1500 }).catch(() => false)) {
       return { yes: true, reason: 'Already connected (1st degree)' };
     }
-
-    // "Pending" or "Withdraw" → invitation already sent
-    const pendingBtn = page.locator(
-      'button:has-text("Pending"), button:has-text("Withdraw")'
+    const pending = page.locator(
+      'button:has-text("Pending"), button:has-text("Withdraw"), ' +
+      'span:has-text("Pending"), [aria-label*="Withdraw" i]'
     ).first();
-    if (await pendingBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+    if (await pending.isVisible({ timeout: 1500 }).catch(() => false)) {
       return { yes: true, reason: 'Connection request already pending' };
     }
-
     return { yes: false, reason: '' };
   } catch {
     return { yes: false, reason: '' };
@@ -223,71 +196,98 @@ async function isAlreadyConnectedOrPending(page) {
 // ─────────────────────────────────────────────────────────────────
 //  MAIN EXPORT
 // ─────────────────────────────────────────────────────────────────
-
 /**
- * Send a LinkedIn connection request to a profile.
- *
- * @param {import('playwright').Page} page    Playwright page
- * @param {string}  profileUrl               Full LinkedIn profile URL
- * @param {string}  note                     Personalised connection note (or '')
- * @param {boolean} dryRun                   If true, log but don't click
- * @returns {Promise<{ sent: boolean, skipped: boolean, reason: string }>}
+ * @param {import('playwright').Page} page
+ * @param {string} profileUrl  - full LinkedIn profile URL
+ * @param {string} note        - AI-generated note (or '')
+ * @param {boolean} dryRun     - if true, don't actually send
+ * @param {string|null} inviteUrl - (ignored, kept for API compat)
  */
-async function sendConnectionRequest(page, profileUrl, note = '', dryRun = false) {
-  // Navigate
-  const navOk = await navigateToProfile(page, profileUrl);
-  if (!navOk) {
-    return { sent: false, skipped: true, reason: 'Navigation failed' };
-  }
-
-  // Check if already connected or pending
-  const { yes, reason: connReason } = await isAlreadyConnectedOrPending(page);
-  if (yes) {
-    return { sent: false, skipped: true, reason: connReason };
-  }
-
-  // Find Connect button
-  const connectBtn = await findConnectButton(page);
-  if (!connectBtn) {
-    return { sent: false, skipped: true, reason: 'Connect button not found on profile' };
-  }
-
-  // DRY RUN — stop here
+async function sendConnectionRequest(page, profileUrl, note = '', dryRun = false, inviteUrl = null) {
   if (dryRun) {
     return {
-      sent: false,
-      skipped: false,
-      reason: '[DRY RUN] Would send connection' + (note ? ' with note' : ' without note'),
+      sent: false, skipped: false,
+      reason: `[DRY RUN] Would visit profile: ${profileUrl}` + (note ? ' with note' : ' without note'),
     };
   }
 
-  // Click Connect
-  await connectBtn.click();
-  await sleep(1200);
+  // ── Step 1: Navigate to profile page ──────────────────────────
+  console.log(`    ↳ Navigating to profile: ${profileUrl}`);
+  try {
+    await page.goto(profileUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await sleep(2500);
+  } catch (e) {
+    return { sent: false, skipped: true, reason: `Profile navigation failed: ${e.message.slice(0, 80)}` };
+  }
 
-  // Handle "How do you know X?" dialog if it appears
-  const emailField = page.locator('input[name="email"]').first();
+  const currentUrl = page.url();
+  if (currentUrl.includes('/login') || currentUrl.includes('/checkpoint')) {
+    return { sent: false, skipped: true, reason: 'LinkedIn redirected to login/checkpoint' };
+  }
+
+  // ── Step 2: Check already connected / pending ─────────────────
+  const { yes, reason: connReason } = await isAlreadyConnectedOrPending(page);
+  if (yes) return { sent: false, skipped: true, reason: connReason };
+
+  // ── Step 3: Click the Connect button to open the modal ────────
+  const connectClicked = await clickConnectOnProfile(page);
+  if (!connectClicked) {
+    return { sent: false, skipped: true, reason: 'Connect button not found on profile page' };
+  }
+
+  // ── Step 4: Handle the modal ──────────────────────────────────
+  // The modal might show "How do you know X?" first (email gate)
+  const emailField = page.locator('input[name="email"], input[type="email"]').first();
   if (await emailField.isVisible({ timeout: 2000 }).catch(() => false)) {
-    return { sent: false, skipped: true, reason: 'LinkedIn requires email — profile outside network' };
+    // Close modal and skip — we can't connect without sharing email
+    await page.keyboard.press('Escape');
+    return { sent: false, skipped: true, reason: 'LinkedIn requires email to connect (outside network)' };
   }
 
-  // Send
-  let finalSent;
+  // ── Step 5: Send with note ────────────────────────────────────
+  let sent = false;
   if (note && note.length > 0) {
-    finalSent = await sendWithNote(page, note);
-    if (!finalSent) {
-      // Fallback: try to send without note (dialog may already be open)
-      finalSent = await sendWithoutNote(page);
+    // Check if textarea is already visible
+    const hasTextarea = await page.locator('textarea').isVisible({ timeout: 2000 }).catch(() => false);
+    if (!hasTextarea) {
+      // Click "Add a note" button inside the modal
+      const addNotePatterns = [
+        'button[aria-label="Add a note"]',
+        'button:has-text("Add a note")',
+        'button:has-text("Add note")',
+        'button:has-text("Personalize")',
+        'a:has-text("Add a note")',
+      ];
+      for (const sel of addNotePatterns) {
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
+            await el.click();
+            console.log(`    ↳ Clicked "Add a note" via: ${sel}`);
+            await sleep(800);
+            break;
+          }
+        } catch { /* try next */ }
+      }
     }
-  } else {
-    finalSent = await sendWithoutNote(page);
+
+    const typed = await fillNote(page, note);
+    if (typed) {
+      console.log('    ↳ Note typed — clicking Send...');
+      sent = await clickSend(page);
+    } else {
+      console.log('    [WARN] Could not fill note textarea — attempting send without note');
+    }
   }
 
-  if (finalSent) {
-    return { sent: true, skipped: false, reason: '' };
-  } else {
-    return { sent: false, skipped: true, reason: 'Send button click failed' };
+  // ── Step 6: Send without note (fallback or no-note mode) ─────
+  if (!sent) {
+    console.log('    ↳ Attempting send without note...');
+    sent = await clickSend(page);
   }
+
+  if (sent) return { sent: true, skipped: false, reason: '' };
+  return { sent: false, skipped: true, reason: 'Send button not found in modal' };
 }
 
 module.exports = { sendConnectionRequest };

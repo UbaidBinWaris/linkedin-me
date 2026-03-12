@@ -72,7 +72,7 @@ Rules:
 - Sound like a peer reaching out, not a vendor
 - End with a friendly close (e.g. "Would love to connect!")
 - NO hashtags, NO emojis, NO "I came across your profile" cliché, NO em-dashes
-- HARD LIMIT: 280 characters total. Count carefully.
+- HARD LIMIT: 170 characters total. Count carefully. Be concise.
 
 Return ONLY the note text.`,
   };
@@ -94,6 +94,7 @@ async function callAI(systemPrompt, userPrompt) {
         max_tokens:  120,
         temperature: 0.80,
       });
+      console.log('    [AI] Note generated via OpenAI gpt-4o-mini');
       return res.choices[0].message.content.trim();
     } catch (e) {
       if (!hasGemini()) throw e;
@@ -105,6 +106,7 @@ async function callAI(systemPrompt, userPrompt) {
   if (hasGemini()) {
     const m      = getGemini();
     const result = await m.generateContent(systemPrompt + '\n\n' + userPrompt);
+    console.log('    [AI] Note generated via Gemini');
     return result.response.text().trim();
   }
 
@@ -116,7 +118,7 @@ async function callAI(systemPrompt, userPrompt) {
 function staticFallback(name, headline, templates) {
   if (!templates || templates.length === 0) {
     const firstName = (name || 'there').split(' ')[0];
-    return `Hi ${firstName}, I'm a Full-Stack dev building SaaS and AI tools. Your background caught my eye — would love to connect!`.slice(0, 295);
+    return `Hi ${firstName}, I'm a Full-Stack dev building SaaS and AI tools. Your background caught my eye, would love to connect!`.slice(0, 190);
   }
   const template  = templates[Math.floor(Math.random() * templates.length)];
   const firstName = (name || 'there').split(' ')[0];
@@ -126,7 +128,7 @@ function staticFallback(name, headline, templates) {
   return template
     .replace(/{firstName}/g, firstName)
     .replace(/{role}/g,      roleGuess)
-    .slice(0, 295);
+    .slice(0, 190);
 }
 
 // ── Public API ────────────────────────────────────────────────────
@@ -153,9 +155,12 @@ async function generateConnectionNote(name, headline, location, templates = []) 
     // Strip any accidental quotes
     note = note.replace(/^["']|["']$/g, '').trim();
 
-    // Enforce the 295-char hard cap
-    if (note.length > 295) {
-      note = note.slice(0, 292) + '...';
+    // Enforce 190-char hard cap (LinkedIn free limit is 200, -10 for safety)
+    if (note.length > 190) {
+      // Trim at last sentence boundary if possible
+      const trimmed = note.slice(0, 187);
+      const lastPeriod = trimmed.lastIndexOf('.');
+      note = lastPeriod > 120 ? trimmed.slice(0, lastPeriod + 1) : trimmed + '...';
     }
 
     // Sanity: too short means AI hallucinated or failed

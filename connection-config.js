@@ -94,13 +94,42 @@ const connectionConfig = {
   //
   // Set to [] to skip the country filter (rely on searchUrl alone).
   targetCountries: [
-    'united states', 'usa', 'us ',
-    'united kingdom', 'uk ', 'england', 'london', 'manchester', 'birmingham',
-    'dubai', 'uae', 'united arab emirates', 'abu dhabi',
-    'australia', 'sydney', 'melbourne', 'brisbane',
-    'canada', 'toronto', 'vancouver', 'calgary',
-    'saudi', 'riyadh', 'jeddah',
+    // United States — country + major metros
+    'united states', 'usa',
+    'new york', 'los angeles', 'san francisco', 'bay area', 'chicago',
+    'seattle', 'boston', 'austin', 'denver', 'dallas', 'houston',
+    'miami', 'atlanta', 'washington', 'phoenix', 'portland',
+    'san jose', 'san diego', 'detroit', 'philadelphia', 'minneapolis',
+    'metropolitan area', 'metro area',        // catches "New York City Metropolitan Area"
+    'greater new york', 'greater chicago', 'greater boston',
+    'greater los angeles', 'greater seattle', 'greater san francisco',
+    'greater washington', 'greater miami', 'greater dallas',
+    // United Kingdom
+    'united kingdom', 'england', 'london', 'manchester', 'birmingham',
+    'leeds', 'glasgow', 'edinburgh', 'liverpool', 'bristol', 'sheffield',
+    'greater london',
+    // UAE
+    'dubai', 'uae', 'united arab emirates', 'abu dhabi', 'sharjah',
+    // Australia
+    'australia', 'sydney', 'melbourne', 'brisbane', 'perth', 'adelaide',
+    // Canada
+    'canada', 'toronto', 'vancouver', 'calgary', 'montreal', 'ottawa',
+    // Middle East
+    'saudi', 'riyadh', 'jeddah', 'saudi arabia',
     'qatar', 'doha',
+    'israel', 'tel aviv',
+    // Europe
+    'netherlands', 'amsterdam', 'rotterdam',
+    'germany', 'berlin', 'munich', 'hamburg', 'frankfurt',
+    'sweden', 'stockholm',
+    'denmark', 'copenhagen',
+    'ireland', 'dublin',
+    // Asia-Pacific
+    'singapore',
+    'india', 'mumbai', 'bangalore', 'delhi', 'hyderabad', 'pune',
+    'new zealand', 'auckland',
+    // Africa
+    'south africa', 'johannesburg', 'cape town',
   ],
 
   // ── Exclude Filters (who to SKIP) ──────────────────────────────────

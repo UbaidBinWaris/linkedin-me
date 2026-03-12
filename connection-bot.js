@@ -231,62 +231,133 @@ async function scrapeSearchPage(page) {
       'Connect', 'Follow', 'Message', 'Pending', 'Withdraw',
       'Promoted', 'Sponsored', 'LinkedIn Member', '...',
     ]);
-    const isDegree  = (s) => /^•?\s*(1st|2nd|3rd\+)/i.test(s);
-    const isNoise   = (s) => NOISE.has(s) || isDegree(s) || /^\d+$/.test(s) || s.length < 2;
+    const isDegree = (s) => /^•?\s*(1st|2nd|3rd\+)/i.test(s);
+    const isNoise  = (s) => NOISE.has(s) || isDegree(s) || /^\d+$/.test(s) || s.length < 2;
 
     const allLinks = Array.from(document.querySelectorAll('a[href*="/in/"]'));
 
     for (const link of allLinks) {
+      // Skip nav / header links (user's own profile in the top bar)
+      if (link.closest('nav, header, [role="navigation"]')) continue;
+
       const href = (link.href || '').split('?')[0];
-      // Keep only real profile URLs
-      if (!href.includes('/in/'))              continue;
-      if (href.includes('/messaging/'))        continue;
-      if (href.includes('/jobs/'))             continue;
-      if (href.includes('/company/'))          continue;
-      if (seenUrls.has(href))                  continue;
+      if (!href.includes('/in/'))       continue;
+      if (href.includes('/messaging/')) continue;
+      if (href.includes('/jobs/'))      continue;
+      if (href.includes('/company/'))   continue;
+      if (seenUrls.has(href))           continue;
       seenUrls.add(href);
 
-      // ── Walk up from the link to find the card boundary ──────────
-      // A "card" is the tightest ancestor that:
-      //   - has substantial text  (>30 chars)
-      //   - contains only ONE unique /in/ URL  (= one person)
-      let card = link;
-      for (let depth = 0; depth < 12; depth++) {
-        if (!card.parentElement) break;
-        card = card.parentElement;
+      // ── Step 1: find the nearest <li> ancestor ──────────────────────
+      // LinkedIn renders each search result as a <li>.
+      // We validate that the FIRST /in/ link inside that <li> is ours —
+      // mutual-connection links appear later in the card markup, not first.
+      let card = null;
+      let liFound = false;
 
-        const uniqueSiblingUrls = new Set(
-          Array.from(card.querySelectorAll('a[href*="/in/"]'))
-               .map((a) => a.href.split('?')[0])
-        );
-        const cardText = (card.innerText || '').trim();
-
-        if (uniqueSiblingUrls.size === 1 && cardText.length > 30) break;
-        // If we've gathered more than one unique profile URL, we went too far — step back
-        if (uniqueSiblingUrls.size > 1)  { card = card.parentElement || card; break; }
+      let el = link.parentElement;
+      for (let d = 0; d < 20 && el && el.tagName !== 'BODY'; d++) {
+        if (el.tagName === 'LI') {
+          liFound = true;
+          const firstIn   = el.querySelector('a[href*="/in/"]');
+          const firstHref = firstIn ? firstIn.href.split('?')[0] : '';
+          if (firstHref === href) {
+            card = el;    // ✓ this li belongs to our profile
+          }
+          // Either way (match or reject), stop at the first <li>
+          break;
+        }
+        el = el.parentElement;
       }
 
-      // ── Extract text lines from the card ───────────────────────────
-      const rawText = (card.innerText || card.textContent || '').trim();
-      if (!rawText) continue;
+      // If we found a <li> but it's not ours, this is a mutual-connection
+      // link inside someone else's card — skip it entirely.
+      if (liFound && !card) continue;
 
-      const lines = rawText
-        .split(/[\n\r]+/)
-        .map((l) => l.trim())
-        .filter((l) => !isNoise(l));
+      // ── Step 2: fallback walk-up (only if no <li> found) ───────────
+      if (!card) {
+        let walker = link.parentElement;
+        for (let d = 0; d < 15 && walker && walker.tagName !== 'BODY'; d++) {
+          const firstIn   = walker.querySelector('a[href*="/in/"]');
+          const firstHref = firstIn ? firstIn.href.split('?')[0] : '';
+          const cardLen   = (walker.innerText || '').trim().length;
+          if (firstHref === href && cardLen > 50) {
+            card = walker;
+            // Keep walking up while the first link is still ours
+            const parent = walker.parentElement;
+            if (parent && parent.tagName !== 'BODY') {
+              const pFirst = parent.querySelector('a[href*="/in/"]');
+              const pHref  = pFirst ? pFirst.href.split('?')[0] : '';
+              if (pHref === href) { walker = parent; continue; }
+            }
+            break;
+          }
+          walker = walker.parentElement;
+        }
+      }
+
+      if (!card) continue;
+
+      // ── Only include cards whose action button is "Connect" ─────────
+      // Skip cards that show "Message" (already 1st degree) or
+      // "Follow" (creator/public figure) — no Connect link present.
+      const hasConnect =
+        card.querySelector('a[href*="custom-invite"]') !== null ||
+        card.querySelector('a[aria-label*="connect" i]') !== null ||
+        card.querySelector('button[aria-label*="connect" i]') !== null;
+      if (!hasConnect) continue;
+
+      // ── Parse card text ─────────────────────────────────────────────
+      const rawText = (card.innerText || card.textContent || '').trim();
+      if (!rawText || rawText.length < 10) continue;
+
+
+      const allRaw = rawText.split(/[\n\r]+/).map((l) => l.trim());
+      const lines  = allRaw.filter((l) => !isNoise(l));
 
       const name     = lines[0] || '';
       const headline = lines[1] || '';
-      const location = lines[2] || '';
 
-      if (!name || name.length < 2 || name.length > 100) continue;
+      // Skip if name looks like a mutual-connections blurb or nav UI text
+      // e.g. "Rohail Rathore, Om Kirshana and 2 mutual connections"
+      // e.g. "0 notifications", "Home", "Jobs"
+      if (!name || name.length < 3 || name.length > 70) continue;
+      if (/^\d/.test(name)) continue;                          // starts with a digit
+      if (/,/.test(name) || /\bmutual\b/i.test(name)) continue;
+      if (/ and \d/i.test(name)) continue;
+      // Common LinkedIn nav labels that bleed through
+      const UI_LABELS = new Set(['home','my network','jobs','messaging','notifications','search','me','for business']);
+      if (UI_LABELS.has(name.toLowerCase())) continue;
 
-      // Degree (look for it in ALL raw lines, not just clean ones)
-      const allLines  = rawText.split(/[\n\r]+/).map((l) => l.trim());
-      const degreeLine = allLines.find((l) => isDegree(l)) || '';
-      const degree    = degreeLine.replace(/^•?\s*/, '').trim();
+      // Location: 3rd non-noise line, skipping connection-count lines
+      let location = '';
+      for (let i = 2; i < Math.min(lines.length, 8); i++) {
+        const ln = lines[i];
+        if (/connections?|followers?/i.test(ln)) continue;
+        if (ln.length < 3) continue;
+        // Skip if line looks like a job title / headline, not a location
+        // Locations are short, no pipes, no '@', no job-role keywords
+        if (ln.includes('|')) continue;
+        if (ln.includes('@')) continue;
+        if (ln.length > 65) continue;
+        if (/\bat\s+[A-Z]/i.test(ln) && ln.split(' ').length > 4) continue; // "Director at Acme Corp"
+        location = ln;
+        break;
+      }
 
-      results.push({ name, headline, location, profileUrl: href, degree });
+      // Degree
+      const degreeLine = allRaw.find((l) => isDegree(l)) || '';
+      const degree     = degreeLine.replace(/^•?\s*/, '').trim();
+
+      // Extract invite URL from the Connect <a> tag in the card
+      const connectEl = card.querySelector('a[href*="custom-invite"]') ||
+                        card.querySelector('a[aria-label*="Invite" i]');
+      const inviteHref = connectEl ? (connectEl.getAttribute('href') || '') : '';
+      const inviteUrl  = inviteHref
+        ? (inviteHref.startsWith('http') ? inviteHref : 'https://www.linkedin.com' + inviteHref)
+        : null;
+
+      results.push({ name, headline, location, profileUrl: href, degree, inviteUrl });
     }
 
     return results;
@@ -298,16 +369,31 @@ async function scrapeSearchPage(page) {
  * Returns true if navigation to next page succeeded.
  */
 async function clickNextPage(page) {
-  // Scroll to the bottom first so the Next button is rendered / visible
+  // Scroll to bottom so the Next button/link is rendered and visible
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  await sleep(1000);
+  await sleep(1200);
 
-  const nextBtn = page.locator(
+  // LinkedIn 2026: pagination uses <a> tags, not <button> — try both
+  const nextSel =
     'button[aria-label="Next"], ' +
-    'li.artdeco-pagination__indicator--number:last-child button'
-  ).first();
+    'a[aria-label="Next"], ' +
+    'button[aria-label*="next page" i], ' +
+    'a[aria-label*="next page" i], ' +
+    'li.artdeco-pagination__indicator--number:last-child button, ' +
+    'li.artdeco-pagination__indicator--number:last-child a';
 
-  if (!(await nextBtn.isVisible({ timeout: 4000 }).catch(() => false))) return false;
+  const nextBtn = page.locator(nextSel).first();
+
+  if (!(await nextBtn.isVisible({ timeout: 5000 }).catch(() => false))) {
+    // Last resort: look for any element containing the text "Next" near the footer
+    const textNext = page.locator('button:has-text("Next"), a:has-text("Next")').last();
+    if (!(await textNext.isVisible({ timeout: 2000 }).catch(() => false))) return false;
+    if (await textNext.isDisabled().catch(() => true)) return false;
+    await textNext.click();
+    await sleep(3500);
+    return true;
+  }
+
   if (await nextBtn.isDisabled().catch(() => true)) return false;
 
   await nextBtn.click();
@@ -418,7 +504,7 @@ async function main() {
       );
       if (remaining <= 0) { log('Connection limit reached. Stopping.'); break; }
 
-      const { name, headline, location, profileUrl, degree } = candidate;
+      const { name, headline, location, profileUrl, degree, inviteUrl } = candidate;
       const normalizedUrl = profileUrl.replace(/\/+$/, '');
       const nameStr       = (name || 'Unknown').slice(0, 28).padEnd(28);
 
@@ -467,7 +553,7 @@ async function main() {
       log(`   URL      : ${profileUrl}`);
 
       // ── Send ───────────────────────────────────────────────────────
-      const result = await sendConnectionRequest(page, profileUrl, note, cfg.dryRun);
+      const result = await sendConnectionRequest(page, profileUrl, note, cfg.dryRun, inviteUrl);
 
       if (result.sent || (cfg.dryRun && !result.skipped)) {
         if (!cfg.dryRun) {

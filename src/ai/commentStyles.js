@@ -60,15 +60,18 @@ Example: "Shipped something similar last [year/quarter] — the real challenge w
 //  COMMENT TYPES (Weight Distribution)
 // ─────────────────────────────────────────────────────────────────
 
+// Weight distribution deliberately biased toward high-performing comment types
+// that drive profile clicks: insight, questions, lessons, and builder takes.
+// Generic reactions (simple_reaction, agreement) are minimised on purpose.
 const COMMENT_TYPES = [
-  { id: 'simple_reaction', weight: 25, label: 'Simple Reaction' },
-  { id: 'agreement',       weight: 20, label: 'Agreement' },
-  { id: 'micro_insight',   weight: 20, label: 'Micro Insight' },
-  { id: 'mini_story',      weight: 10, label: 'Mini Story' },
-  { id: 'curious_question',weight: 10, label: 'Curious Question' },
-  { id: 'builder_feedback',weight: 10, label: 'Builder Feedback' },
-  { id: 'supportive',      weight: 5,  label: 'Supportive' },
-  { id: 'celebratory',     weight: 5,  label: 'Celebratory' }
+  { id: 'micro_insight',   weight: 28, label: 'Micro Insight'    },  // Add a specific insight/nuance
+  { id: 'curious_question',weight: 22, label: 'Curious Question' },  // Ask a sharp focused question
+  { id: 'builder_feedback',weight: 20, label: 'Builder Feedback' },  // Share a real-world lesson
+  { id: 'mini_story',      weight: 17, label: 'Mini Story'       },  // Compact concrete experience
+  { id: 'agreement',       weight: 8,  label: 'Agreement'        },  // Agree WITH a specific reason
+  { id: 'supportive',      weight: 3,  label: 'Supportive'       },  // Rare: only for personal posts
+  { id: 'simple_reaction', weight: 1,  label: 'Simple Reaction'  },  // Almost never — too generic
+  { id: 'celebratory',     weight: 1,  label: 'Celebratory'      }   // Almost never — too passive
 ];
 
 function pickRandomType() {

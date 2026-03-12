@@ -156,10 +156,7 @@ async function generateComment(postText, authorName, commentStyle = null) {
     toneInstruction = 'Tone of post appears to be empathetic. Match that tone subtly.';
   }
 
-  // 15% chance to output a single 1-liner reaction instead of a deep thought
-  const overrideShort = (Math.random() < 0.15)
-    ? '\nCRITICAL RULE FOR THIS COMMENT: Return 1 short line. No deep insight. Just a simple, casual micro-reaction.'
-    : '';
+  const overrideShort = ''; // Reserved for future use — no hollow micro-reactions
 
   // Integrate comment type
   const commentTypeObj = require('./commentStyles').pickRandomType();
@@ -185,20 +182,20 @@ ${postText.slice(0, 1500)}
 """
 
 Comment rules:
-- Keep it concise. Usually under 150 characters unless depth is needed.
-- If you assess interest_score between 40 and 65, generate a short lightweight comment.
-- If between 65 and 85, generate a medium thoughtful comment.
-- If above 85, generate a deeper comment.
-- Vary structure. Some comments can be one sentence. Some two.
-- ONLY ask a question at the end IF the post contains incomplete/mismatched info, or introduces new tech needing explanation. Otherwise, do NOT include a question.
-- Sound like a real human professional. Sometimes start with "So true." or "Love this."
-- Reference ONE specific concept from the post — not a generic reflection.
-- Avoid generic praise unless combined with a specific reference to the post.
-- Avoid academic phrasing and buzzwords like leverage, optimize, paradigm. Avoid list-like structure.
+- NEVER open with generic phrases like "So true.", "Love this.", "Great post.", "Spot on.", or any empty validation.
+- Every comment MUST do at least ONE of these four things:
+  1. Add a specific insight, data point, or real-world nuance the post didn't cover
+  2. Gently challenge or add nuance to the author's idea, with a clear reason
+  3. Share a compact, concrete mini-lesson from hands-on experience
+  4. Ask ONE sharp, specific question that shows you read and thought deeply about the post
+- Reference ONE specific concept, claim, or detail from the post — never be generic.
+- Structure: 1-2 tight sentences. First sentence = your take or observation. Optional second = a focused follow-up question or implication.
+- Length: 120-220 characters for score < 70. 220-350 characters for score >= 70. Never pad to hit length.
+- Sound like a peer, not a fan. You are a professional commenting, not praising.
+- Avoid academic phrasing and buzzwords like leverage, optimize, paradigm, synergy. No list-like structure.
 - NO emojis, NO hashtags.
 - Do NOT mention ${name}'s own name.
-- Do NOT be sycophantic or flattering. You are peers.
-- NEVER use the "—" (em-dash) or "-" (hyphen) character to separate thoughts. Just use normal periods.
+- NEVER use the "—" (em-dash) or "-" (hyphen) character to separate thoughts. Use periods.
 
 Respond with ONLY this JSON:
 {
