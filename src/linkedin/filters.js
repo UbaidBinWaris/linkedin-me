@@ -70,6 +70,20 @@ const SENTIMENT_SKIP_SIGNALS = [
   'struggling mentally', 'lost someone', 'tragedy', 'devastating news',
 ];
 
+/** Non-target country signals — authors from these regions are NOT authentic leads */
+const NON_TARGET_COUNTRY_SIGNALS = [
+  // Country
+  'pakistan',
+  // Major cities
+  'lahore', 'karachi', 'islamabad', 'rawalpindi', 'faisalabad',
+  'peshawar', 'multan', 'sialkot', 'gujranwala', 'quetta',
+  'bahawalpur', 'abbottabad', 'mardan', 'sukkur',
+  // Pakistani university abbreviations (commonly in headlines)
+  'nust', 'lums', 'fast-nuces', 'fast nuces', 'comsats',
+  'uet lahore', 'uet peshawar', 'pieas', 'giki', 'itu lahore',
+  'ned university', 'iba karachi', 'air university',
+];
+
 // ─────────────────────────────────────────────────────────────────
 //  SCORING SIGNALS
 // ─────────────────────────────────────────────────────────────────
@@ -150,6 +164,10 @@ function isJobPost(postText = '') {
 function isSentimentPost(postText = '') {
   return hasAny(lc('', '', postText.slice(0, 600)), SENTIMENT_SKIP_SIGNALS);
 }
+/** Check if author is from a non-target country (based on headline/location signals) */
+function isNonTargetCountry(authorHeadline = '') {
+  return hasAny(lc('', '', authorHeadline), NON_TARGET_COUNTRY_SIGNALS);
+}
 
 /**
  * Master skip check. Returns { skip: bool, reason: string }
@@ -169,6 +187,8 @@ function shouldSkip(authorName = '', authorHeadline = '', postText = '') {
     return { skip: true, reason: 'Author appears to be a student / junior' };
   if (isJobPost(postText))
     return { skip: true, reason: 'Post is a job advertisement' };
+  if (isNonTargetCountry(authorHeadline))
+    return { skip: true, reason: 'Author is from a non-target country (not a lead)' };
   if (isSentimentPost(postText))
     return { skip: true, reason: 'Post is about grief / tragedy — skip out of respect' };
     
@@ -423,6 +443,7 @@ module.exports = {
   calcCommentVisibilityScore,
   // Signal lists (for extension)
   OTW_SIGNALS, STUDENT_SIGNALS, JOB_POST_SIGNALS,
-  SENTIMENT_SKIP_SIGNALS, NICHE_SIGNALS, SENIORITY_SIGNALS,
+  SENTIMENT_SKIP_SIGNALS, NON_TARGET_COUNTRY_SIGNALS,
+  NICHE_SIGNALS, SENIORITY_SIGNALS,
   GOOD_SIGNALS, BAD_SIGNALS,
 };

@@ -35,6 +35,7 @@ const {
   writeCommentedPost,
   ensureDataFiles,
 } = require('./src/data/csv');
+const { logCommentPerformance, getSummary: getLearningStats } = require('./src/data/learning');
 const config = require('./src/config');
 
 // ─────────────────────────────────────────────────────────────────
@@ -128,6 +129,7 @@ async function main() {
   const recentAuthors = await loadRecentAuthors();
   success(`Loaded ${commentedIds.size} previously commented post(s) for deduplication.`);
   success(`Loaded ${recentAuthors.size} recently contacted author(s) (7-day cooldown).`);
+  try { success(`Learning: ${getLearningStats()}`); } catch { /* first run */ }
 
   // ── Step 3: Natural inactivity check ────────────────────────────
   logStep(3, 'Natural inactivity check');
@@ -297,7 +299,10 @@ async function main() {
           // Step 7: Generate
           logStep(7, 'Generating comment with AI...');
           await delay(2000, 4000);
-          const result = await generateComment(post.postText, post.authorName, style);
+          const result = await generateComment(post.postText, post.authorName, style, {
+            existingComments: post.commentsData || [],
+            authorHeadline: post.authorHeadline || '',
+          });
           
           log(`   AI Target Angle: ${result.bestAngle}`);
           console.log(chalk.italic(`   "${result.comment}"\n`));
@@ -341,6 +346,25 @@ async function main() {
               commentedFullUrls.add(normalizedUrl);
               recentAuthors.add((post.authorName || '').toLowerCase());
               commentsMade++;
+
+              // Track for self-learning
+              try {
+                logCommentPerformance({
+                  postUrl: post.postUrl,
+                  authorName: post.authorName,
+                  authorHeadline: post.authorHeadline || '',
+                  comment: result.comment,
+                  style: style.id,
+                  type: '',
+                  score,
+                  bestAngle: result.bestAngle || '',
+                  existingCommentCount: (post.commentsData || []).length,
+                  authorCountry: '',
+                  postFormat: post.postFormat || 'text',
+                });
+              } catch (learnErr) {
+                warn(`   [!] Learning log failed: ${learnErr.message.slice(0, 60)}`);
+              }
 
               // Re-read from disk once more to stay fully in sync
               const fresh = await readCommentedPosts();

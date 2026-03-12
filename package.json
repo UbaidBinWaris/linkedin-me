@@ -1,6 +1,6 @@
 {
   "name": "linkedin-comment-bot",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "LinkedIn comment bot using Playwright and Gemini AI",
   "main": "bot.js",
   "scripts": {

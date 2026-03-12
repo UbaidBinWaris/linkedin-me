@@ -1,15 +1,17 @@
 'use strict';
 /**
- * AI module — supports both OpenAI and Google Gemini.
- * Priority: OpenAI (if OPENAI_API_KEY is set) → Gemini (if GEMINI_API_KEY is set)
- * Falls back to heuristic scoring if both fail.
+ * AI module — supports OpenAI, Google Gemini, and Ollama (local open-source).
+ * Priority: OpenAI → Gemini → Ollama
+ * Falls back to heuristic scoring if all fail.
  */
 
 const config = require('../config');
+const { getBannedPromptBlock, hasBannedOpener, cleanComment } = require('./bannedPhrases');
 
 // ── Lazy-loaded clients ──────────────────────────────────────────
 let openaiClient = null;
 let geminiModel  = null;
+let ollamaClient = null;
 
 function getOpenAI() {
   if (!openaiClient) {
@@ -28,12 +30,26 @@ function getGemini() {
   return geminiModel;
 }
 
+function getOllama() {
+  if (!ollamaClient) {
+    const { OpenAI } = require('openai');
+    ollamaClient = new OpenAI({
+      baseURL: config.ollama?.baseUrl || 'http://localhost:11434/v1',
+      apiKey:  'ollama',  // Ollama doesn't need a real key
+    });
+  }
+  return ollamaClient;
+}
+
 // ── Detect which provider to use ────────────────────────────────
 function hasOpenAI() {
   return !!(config.openaiApiKey && config.openaiApiKey.startsWith('sk-') && config.openaiApiKey.length > 20);
 }
 function hasGemini() {
   return !!(config.geminiApiKey && config.geminiApiKey.length > 20);
+}
+function hasOllama() {
+  return !!(config.ollama?.enabled);
 }
 
 // ── Raw text generation (provider-agnostic) ──────────────────────
@@ -69,12 +85,47 @@ async function generateText(systemPrompt, userPrompt, forceJson = false) {
 
   // Try Gemini as fallback
   if (hasGemini()) {
-    const m = getGemini();
-    const result = await m.generateContent(systemPrompt + '\n\n' + userPrompt);
-    return result.response.text().trim();
+    try {
+      const m = getGemini();
+      const result = await m.generateContent(systemPrompt + '\n\n' + userPrompt);
+      return result.response.text().trim();
+    } catch (e) {
+      if (hasOllama()) {
+        console.log('  Gemini failed, trying Ollama:', e.message.slice(0, 60));
+      } else {
+        throw e;
+      }
+    }
   }
 
-  throw new Error('No working AI provider. Set OPENAI_API_KEY or GEMINI_API_KEY in .env');
+  // Try Ollama (local open-source) as last resort
+  if (hasOllama()) {
+    try {
+      const ai = getOllama();
+      const model = config.ollama?.model || 'llama3.1';
+      const params = {
+        model,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user',   content: userPrompt   },
+        ],
+        max_tokens: 400,
+        temperature: 0.75,
+      };
+
+      if (forceJson) {
+        params.response_format = { type: 'json_object' };
+      }
+
+      const res = await ai.chat.completions.create(params);
+      console.log(`  [AI] Generated via Ollama (${model})`);
+      return res.choices[0].message.content.trim();
+    } catch (e) {
+      throw new Error(`Ollama failed: ${e.message}`);
+    }
+  }
+
+  throw new Error('No working AI provider. Set OPENAI_API_KEY, GEMINI_API_KEY, or enable Ollama in .env');
 }
 
 // ── Interest scoring ─────────────────────────────────────────────
@@ -133,19 +184,21 @@ Respond with ONLY this JSON:
 
 // ── Comment generation ───────────────────────────────────────────
 /**
- * Generates a personalized professional LinkedIn comment.
- *
-/**
  * Generates a personalized professional LinkedIn comment WITH AI reasoning.
+ * Now comment-aware: reads existing comments to avoid duplicating angles.
  *
  * Returns: { comment, interestScore, whyInteresting, bestAngle }
  *
  * @param {string} postText    - The post content
  * @param {string} authorName  - Author's name
  * @param {object} [commentStyle] - Style from commentStyles.js
+ * @param {object} [context]   - Additional context for smarter generation
+ * @param {string[]} [context.existingComments] - Comments already on the post
+ * @param {string}   [context.authorHeadline]   - Author's LinkedIn headline
  */
-async function generateComment(postText, authorName, commentStyle = null) {
+async function generateComment(postText, authorName, commentStyle = null, context = {}) {
   const { name, headline, about } = config.profile;
+  const { existingComments = [], authorHeadline = '' } = context;
 
   // Emotional tone detection
   const textLower = postText.toLowerCase();
@@ -156,8 +209,6 @@ async function generateComment(postText, authorName, commentStyle = null) {
     toneInstruction = 'Tone of post appears to be empathetic. Match that tone subtly.';
   }
 
-  const overrideShort = ''; // Reserved for future use — no hollow micro-reactions
-
   // Integrate comment type
   const commentTypeObj = require('./commentStyles').pickRandomType();
   const typeInstruction = commentTypeObj ? `\nComment Type to aim for: ${commentTypeObj.label}` : '';
@@ -165,6 +216,21 @@ async function generateComment(postText, authorName, commentStyle = null) {
   const styleInstruction = commentStyle
     ? `\nYour writing approach for this comment — "${commentStyle.label}":\n${commentStyle.instruction}\n`
     : '';
+
+  // Build existing comments context block
+  let existingCommentsBlock = '';
+  if (existingComments.length > 0) {
+    const shown = existingComments.slice(0, 5).map((c, i) => `  ${i + 1}. "${c.slice(0, 150)}"`).join('\n');
+    existingCommentsBlock = `\n\nExisting comments on this post (DO NOT repeat any of these angles or ideas):\n${shown}\n\nYour comment MUST add a DIFFERENT perspective not covered above. If all obvious angles are taken, go deeper or challenge the premise.`;
+  }
+
+  // Build author context
+  const authorBlock = authorHeadline
+    ? `\nAuthor's role: ${authorHeadline} — tailor your comment to resonate with someone at this level.`
+    : '';
+
+  // Banned phrases block
+  const bannedBlock = getBannedPromptBlock();
 
   const systemPrompt = `You are writing a LinkedIn comment on behalf of ${name}, a ${headline.split('|')[0].trim()}. Respond ONLY with valid JSON — no markdown, no explanation outside the JSON.
 Write like an active LinkedIn user in tech. Vary tone naturally. Do not sound like an AI assistant. Avoid structured corporate language.`;
@@ -174,7 +240,7 @@ Write like an active LinkedIn user in tech. Vary tone naturally. Do not sound li
 About ${name}:
 ${about}
 ${styleInstruction}${typeInstruction}
-${toneInstruction}${overrideShort}
+${toneInstruction}${authorBlock}${existingCommentsBlock}
 
 Post by ${authorName || 'the author'}:
 """
@@ -183,6 +249,7 @@ ${postText.slice(0, 1500)}
 
 Comment rules:
 - NEVER open with generic phrases like "So true.", "Love this.", "Great post.", "Spot on.", or any empty validation.
+${bannedBlock}
 - Every comment MUST do at least ONE of these four things:
   1. Add a specific insight, data point, or real-world nuance the post didn't cover
   2. Gently challenge or add nuance to the author's idea, with a clear reason
@@ -214,8 +281,16 @@ Respond with ONLY this JSON:
       throw new Error('AI returned empty comment in JSON');
     }
 
+    // Post-generation safety net: strip banned openers that slipped through
+    let finalComment = parsed.comment.trim();
+    const { banned } = hasBannedOpener(finalComment);
+    if (banned) {
+      console.log('    ⚠️  AI used banned opener — auto-cleaning...');
+      finalComment = cleanComment(finalComment);
+    }
+
     return {
-      comment:        parsed.comment.trim(),
+      comment:        finalComment,
       interestScore:  typeof parsed.interest_score === 'number' ? parsed.interest_score : 50,
       whyInteresting: parsed.why_interesting || '',
       bestAngle:      parsed.best_angle || '',

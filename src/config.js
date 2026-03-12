@@ -49,6 +49,14 @@ const config = {
       'I build scalable web applications and automation tools. ' +
       'Passionate about clean code, developer productivity, and emerging technologies.',
   },
+  // ── Ollama (local open-source AI) ──
+  // Install: https://ollama.ai → `ollama pull llama3.1`
+  // Set OLLAMA_ENABLED=true in .env to activate as fallback after OpenAI/Gemini.
+  ollama: {
+    enabled: process.env.OLLAMA_ENABLED === 'true',
+    baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1',
+    model:   process.env.OLLAMA_MODEL || 'llama3.1',
+  },
 };
 
 module.exports = config;
