@@ -5,3 +5,5 @@ data/commented_posts.csv
 *.log
 
 data/*
+
+*.zip
