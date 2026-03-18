@@ -44,10 +44,16 @@ const config = {
   // ── Your LinkedIn profile (used in Gemini prompt) ──
   profile: {
     name: process.env.MY_NAME || 'Ubaid Waris',
-    headline: process.env.MY_HEADLINE || 'Full Stack Developer | Next.js | Node.js | React | DevOps',
+    headline: process.env.MY_HEADLINE || 'Full Stack Developer | SaaS Development | CRM & n8n Automation | AI Agents | Node.js | Next.js',
     about: process.env.MY_ABOUT ||
-      'I build scalable web applications and automation tools. ' +
-      'Passionate about clean code, developer productivity, and emerging technologies.',
+      'Full-Stack Developer specializing in SaaS development, CRM automation, and AI-powered workflows. ' +
+      'A few favorite wins: ' +
+      'Built SEO-optimized websites that scaled from zero traffic to consistent lead generation. ' +
+      'Automated workflows + API integrations that cut manual tasks by 50% and improved revenue. ' +
+      'Integrated CRMs and SaaS apps with custom APIs for real-time dashboards and data flow. ' +
+      'Designed responsive UI/UX systems that boosted user engagement and conversions. ' +
+      'Delivered secure, scalable Node.js and JavaScript applications with optimized performance. ' +
+      'Built n8n automation workflows and AI Agents for business process optimization.',
   },
   // ── Ollama (local open-source AI) ──
   // Install: https://ollama.ai → `ollama pull llama3.1`

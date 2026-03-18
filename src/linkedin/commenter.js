@@ -88,13 +88,13 @@ async function scrollContainer(page, px) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  Like + Comment helpers — use componentkey for stable card lookup
-//  (index can shift when LinkedIn lazy-loads; componentkey is unique)
+//  Like + Comment helpers (operate on a card element inside evaluate)
 // ─────────────────────────────────────────────────────────────────
 
-async function likeCard(page, cardKey) {
-  return page.evaluate((key) => {
-    const card = document.querySelector(`[componentkey="${CSS.escape(key)}"]`);
+async function likeCard(page, cardIndex) {
+  return page.evaluate((idx) => {
+    const cards = document.querySelectorAll('[role="listitem"][componentkey*="FeedType_"]');
+    const card = cards[idx];
     if (!card) return false;
     const btns = [...card.querySelectorAll('button')];
     for (const btn of btns) {
@@ -106,12 +106,13 @@ async function likeCard(page, cardKey) {
       }
     }
     return false;
-  }, cardKey);
+  }, cardIndex);
 }
 
-async function clickCommentButton(page, cardKey) {
-  return page.evaluate((key) => {
-    const card = document.querySelector(`[componentkey="${CSS.escape(key)}"]`);
+async function clickCommentButton(page, cardIndex) {
+  return page.evaluate((idx) => {
+    const cards = document.querySelectorAll('[role="listitem"][componentkey*="FeedType_"]');
+    const card = cards[idx];
     if (!card) return false;
     const btns = [...card.querySelectorAll('button')];
     for (const btn of btns) {
@@ -123,18 +124,16 @@ async function clickCommentButton(page, cardKey) {
       if (btn.querySelector('svg[id*="comment"], use[href*="comment"]')) { btn.click(); return true; }
     }
     return false;
-  }, cardKey);
+  }, cardIndex);
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  Find the feed card for a given activity ID
-//  Returns { idx, cardKey } where cardKey is the full componentkey string
-//  (used as the stable identifier for all subsequent card operations).
+//  Find the feed card index for a given activity ID
 //  Scrolls up to 3 extra batches to find it if not yet rendered.
 // ─────────────────────────────────────────────────────────────────
 async function findCardIndex(page, activityId) {
   for (let attempt = 0; attempt < 4; attempt++) {
-    const result = await page.evaluate((targetId) => {
+    const idx = await page.evaluate((targetId) => {
       const LO = 6000000000000000000n;
       const HI = 9999999999999999999n;
       function decode(b64url) {
@@ -164,39 +163,36 @@ async function findCardIndex(page, activityId) {
       for (let i = 0; i < cards.length; i++) {
         const ck = cards[i].getAttribute('componentkey') || '';
         const m = ck.match(/^expanded([A-Za-z0-9_\-]{20,})FeedType_/);
-        if (m && decode(m[1]) === targetId) return { idx: i, cardKey: ck };
+        if (m && decode(m[1]) === targetId) return i;
       }
-      return null;
+      return -1;
     }, activityId);
 
-    if (result) return result;  // { idx, cardKey }
+    if (idx !== -1) return idx;
     if (attempt < 3) {
       // Scroll to load more cards and wait
       await scrollContainer(page, 900);
       await sleep(1200);
     }
   }
-  return null;  // not found
+  return -1;
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  Scroll a specific card into the viewport — by componentkey
+//  Scroll a specific card into the viewport
 // ─────────────────────────────────────────────────────────────────
-async function scrollCardIntoView(page, cardKey) {
-  await page.evaluate((key) => {
-    const card = document.querySelector(`[componentkey="${CSS.escape(key)}"]`);
-    if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  }, cardKey);
+async function scrollCardIntoView(page, cardIndex) {
+  await page.evaluate((idx) => {
+    const cards = document.querySelectorAll('[role="listitem"][componentkey*="FeedType_"]');
+    if (cards[idx]) cards[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, cardIndex);
   await sleep(800);
 }
 
 // ─────────────────────────────────────────────────────────────────
 //  Find the comment input box and type + submit
-//  cardKey: optional componentkey string — when provided, the comment
-//  box is searched within the target card first, preventing the bot
-//  from accidentally typing into a still-open box from a previous post.
 // ─────────────────────────────────────────────────────────────────
-async function typeAndSubmit(page, commentText, cardKey = null) {
+async function typeAndSubmit(page, commentText) {
   const boxSelectors = [
     '.ql-editor[contenteditable="true"]',
     '[contenteditable="true"][data-placeholder*="comment" i]',
@@ -208,78 +204,13 @@ async function typeAndSubmit(page, commentText, cardKey = null) {
   ];
 
   let commentBox = null;
-
-  // ── Priority 1: search WITHIN the target card (scoped) ──
-  // This prevents picking up a still-open box from the previous post.
-  if (cardKey) {
-    const cardBoxSel = boxSelectors
-      .map(s => `[componentkey="${cardKey.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"] ${s}, [componentkey="${cardKey.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"] ~ * ${s}`)
-      .join(', ');
-
-    // Use evaluate for the scoped search — querySelector is more reliable here
-    const foundInCard = await page.evaluate((key, sels) => {
-      const card = [...document.querySelectorAll('[role="listitem"][componentkey*="FeedType_"]')]
-        .find(c => c.getAttribute('componentkey') === key);
-      if (!card) return false;
-      // Also check the next sibling (LinkedIn sometimes renders comment box outside the card)
-      const searchRoots = [card, card.nextElementSibling, card.parentElement].filter(Boolean);
-      for (const root of searchRoots) {
-        for (const sel of sels) {
-          const el = root.querySelector(sel);
-          if (el) {
-            const r = el.getBoundingClientRect();
-            if (r.width > 50 && r.height > 10) return true;
-          }
-        }
-      }
-      return false;
-    }, cardKey, boxSelectors).catch(() => false);
-
-    if (foundInCard) {
-      // Now use Playwright locator scoped to that card
-      for (const sel of boxSelectors) {
-        const el = page.locator(`[componentkey="${cardKey}"] ${sel}, [componentkey="${cardKey}"] ~ * ${sel}`).first();
-        if (await el.isVisible({ timeout: 1500 }).catch(() => false)) {
-          commentBox = el;
-          console.log('    ✓ Comment box found within target card');
-          break;
-        }
-      }
+  for (const sel of boxSelectors) {
+    const el = page.locator(sel).first();
+    if (await el.isVisible({ timeout: 2000 }).catch(() => false)) {
+      commentBox = el; break;
     }
   }
-
-  // ── Priority 2: most-recently-visible comment box (globally) ──
-  // Find the comment box that appeared LAST — it's the one just opened.
-  if (!commentBox) {
-    // Get all visible comment editors, pick the one lowest on screen (most recently scrolled to)
-    const lowestBox = await page.evaluate((sels) => {
-      let best = null, bestBottom = -1;
-      for (const sel of sels) {
-        for (const el of document.querySelectorAll(sel)) {
-          const r = el.getBoundingClientRect();
-          if (r.width > 50 && r.height > 10 && r.bottom > bestBottom) {
-            bestBottom = r.bottom;
-            best = sel;
-          }
-        }
-      }
-      return best;
-    }, boxSelectors).catch(() => null);
-
-    if (lowestBox) {
-      const all = page.locator(lowestBox);
-      const count = await all.count().catch(() => 0);
-      // Pick the last (lowest) visible instance
-      for (let i = count - 1; i >= 0; i--) {
-        const el = all.nth(i);
-        if (await el.isVisible({ timeout: 600 }).catch(() => false)) {
-          commentBox = el; break;
-        }
-      }
-    }
-  }
-
-  // ── Priority 3: any empty contenteditable (original fallback) ──
+  // Generic fallback: any empty contenteditable
   if (!commentBox) {
     const all = page.locator('[contenteditable="true"]');
     const count = await all.count().catch(() => 0);
@@ -291,7 +222,6 @@ async function typeAndSubmit(page, commentText, cardKey = null) {
     }
   }
   if (!commentBox) return false;
-
 
   await commentBox.click();
   await sleep(400);
@@ -435,22 +365,19 @@ async function postComment(page, postUrl, commentText) {
     // ── Strategy 1: act on the feed card directly (no navigation) ──
     if (activityId) {
       console.log(`    🔍 Looking for feed card (activity:${activityId})...`);
-      const found = await findCardIndex(page, activityId);
+      const cardIdx = await findCardIndex(page, activityId);
 
-      if (found) {
-        const { idx: cardIdx, cardKey } = found;
+      if (cardIdx !== -1) {
         console.log(`    ✓ Found card at index ${cardIdx} — staying on feed`);
-        // From here, ALL card operations use cardKey (componentkey string),
-        // not cardIdx — so LinkedIn lazy-loading reshuffling indices doesn't matter.
-        await scrollCardIntoView(page, cardKey);
+        await scrollCardIntoView(page, cardIdx);
 
         // Like
-        const liked = await likeCard(page, cardKey);
+        const liked = await likeCard(page, cardIdx);
         if (liked) { console.log('    👍 Post liked'); await sleep(900); }
         else        { console.log('    ⓘ Like skipped (already liked or not found)'); }
 
         // Open comment box on the card
-        const opened = await clickCommentButton(page, cardKey);
+        const opened = await clickCommentButton(page, cardIdx);
         if (opened) { console.log('    ✓ Comment button clicked'); }
         else        { console.log('    ⚠️  Comment button not found on card'); }
 
@@ -502,8 +429,7 @@ async function postComment(page, postUrl, commentText) {
         }
 
         // Type + submit (works on both feed card inline box and post-page box)
-        // Pass cardKey so typeAndSubmit searches within the target card first.
-        const submitted = await typeAndSubmit(page, commentText, cardKey);
+        const submitted = await typeAndSubmit(page, commentText);
         if (!submitted) {
           console.log('    ⚠️  No comment box found');
           return false;
@@ -584,7 +510,7 @@ async function postComment(page, postUrl, commentText) {
       }
     }
 
-    // ── Type + submit via shared helper (page-navigation fallback, no cardKey) ──
+    // ── Type + submit via shared helper ──
     const submitted = await typeAndSubmit(page, commentText);
     if (!submitted) {
       console.log('    ⚠️  No comment box found on:', postUrl.slice(-50));
