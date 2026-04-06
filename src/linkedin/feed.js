@@ -731,11 +731,26 @@ async function collectByBodyText(page) {
 //  DEDUP
 // ─────────────────────────────────────────────────────────────────
 
+/**
+ * Normalize post text for dedup comparison.
+ * Strips "See more" suffixes, collapses whitespace, lowercases.
+ */
+function normalizePostText(text) {
+  return (text || '')
+    .replace(/[…\.]{2,}\s*see more\s*$/i, '')
+    .replace(/\s*see more\s*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 function dedup(posts) {
   const seenUrls = new Set();
   const seenText = new Set();
   return posts.filter((p) => {
-    const textKey = p.postText.slice(0, 60);
+    // Text-only key (no author) — more robust across scraping strategies
+    // where the same post may have slightly different author name parsing.
+    const textKey = normalizePostText(p.postText).slice(0, 80);
     if (seenText.has(textKey)) return false;
     seenText.add(textKey);
     if (p.postUrl) {
@@ -980,7 +995,11 @@ async function getFeedPostsBatch(page, passes = 5) {
         found.slice(0, 3).forEach((p, idx) => {
           console.log(`    [${idx}] url=${p.postUrl || 'NULL'} | author=${p.authorName} | textLen=${p.postText.length}`);
         });
-        posts = posts.concat(found);
+        // Use ONLY the first strategy that finds posts. Do NOT concatenate multiple
+        // strategies — the same post can appear with different URL formats
+        // (ugcPost ID vs activity ID) across strategies, which defeats dedup.
+        posts = found;
+        break;
       }
     } catch (e) {
       console.log(`  [DEBUG] Strategy "${name}" error: ${e.message}`);
@@ -992,4 +1011,4 @@ async function getFeedPostsBatch(page, passes = 5) {
   return dedupd;
 }
 
-module.exports = { findOneInterestingPost, scrapeProfilePosts, getFeedPostsBatch, parseEngagement };
+module.exports = { findOneInterestingPost, scrapeProfilePosts, getFeedPostsBatch, parseEngagement, normalizePostText };

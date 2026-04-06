@@ -1,0 +1,34 @@
+// Prisma schema for LinkedIn Comment Bot
+// Run: npx prisma migrate dev --name init
+//  or: npx prisma db push   (faster for development)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  CommentedPost — permanent record of every comment attempt
+//
+//  postId is the canonical dedup key (19-digit LinkedIn snowflake ID
+//  or the full URL when no ID can be extracted).
+//  The UNIQUE constraint at database level is the final safety net —
+//  even if application logic races, PostgreSQL will reject a second
+//  insert for the same postId with a unique-constraint error.
+// ─────────────────────────────────────────────────────────────────
+model CommentedPost {
+  id          Int      @id @default(autoincrement())
+  postId      String   @unique          // 19-digit activity ID (dedup key)
+  postUrl     String?                   // full LinkedIn URL (for debugging)
+  authorName  String?                   // author name at time of comment
+  commentText String?                   // AI-generated comment text
+  commentedAt DateTime @default(now())  // UTC timestamp
+
+  @@index([postId])
+  @@index([commentedAt])
+  @@map("commented_posts")
+}

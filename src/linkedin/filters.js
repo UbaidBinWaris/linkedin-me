@@ -70,18 +70,15 @@ const SENTIMENT_SKIP_SIGNALS = [
   'struggling mentally', 'lost someone', 'tragedy', 'devastating news',
 ];
 
-/** Non-target country signals — authors from these regions are NOT authentic leads */
+/** Non-target country signals — authors from these regions are NOT authentic leads.
+ *  NOTE: Pakistan is intentionally NOT listed here — the user's own LinkedIn feed
+ *  is primarily Pakistani connections, and filtering them would block most posts.
+ *  Add back specific regions only if you want to explicitly exclude them.
+ */
 const NON_TARGET_COUNTRY_SIGNALS = [
-  // Country
-  'pakistan',
-  // Major cities
-  'lahore', 'karachi', 'islamabad', 'rawalpindi', 'faisalabad',
-  'peshawar', 'multan', 'sialkot', 'gujranwala', 'quetta',
-  'bahawalpur', 'abbottabad', 'mardan', 'sukkur',
-  // Pakistani university abbreviations (commonly in headlines)
-  'nust', 'lums', 'fast-nuces', 'fast nuces', 'comsats',
-  'uet lahore', 'uet peshawar', 'pieas', 'giki', 'itu lahore',
-  'ned university', 'iba karachi', 'air university',
+  // Pakistani university abbreviations that indicate student/fresher status
+  // (kept here as a signal of junior-level profiles, not geography)
+  // 'nust', 'lums', etc. — removed; covered by STUDENT_SIGNALS already
 ];
 
 // ─────────────────────────────────────────────────────────────────
@@ -192,9 +189,8 @@ function shouldSkip(authorName = '', authorHeadline = '', postText = '') {
   if (isSentimentPost(postText))
     return { skip: true, reason: 'Post is about grief / tragedy — skip out of respect' };
     
-  // Added temporarily for debug
-  if (postText.length < 80)
-    return { skip: true, reason: 'Post text is too short (< 80 chars)' };
+  if (postText.length < 50)
+    return { skip: true, reason: 'Post text is too short (< 50 chars)' };
     
   return { skip: false, reason: '' };
 }
@@ -217,10 +213,11 @@ function shouldSkip(authorName = '', authorHeadline = '', postText = '') {
  */
 function calcHeuristicScore(postText = '', commentsData = []) {
   const t = lc('', '', postText);
-  if (postText.length < 100) return 0;
+  if (postText.length < 50) return 0;
 
-  let score = 0;
-  if (postText.length > 300)  score += 15;
+  let score = 20; // base score — every real post starts with some value
+  if (postText.length > 150)  score += 10;
+  if (postText.length > 300)  score += 10;
   if (postText.length > 600)  score += 10;
   if (postText.length > 1000) score += 5;
 

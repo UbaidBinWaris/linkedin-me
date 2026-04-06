@@ -9,12 +9,17 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
+    "@prisma/client": "^5.22.0",
     "chalk": "^4.1.2",
     "csv-parser": "^3.0.0",
     "csv-writer": "^1.6.0",
     "dotenv": "^16.4.7",
+    "ioredis": "^5.10.1",
     "openai": "^6.24.0",
     "playwright": "^1.50.1"
+  },
+  "devDependencies": {
+    "prisma": "^5.22.0"
   },
   "engines": {
     "node": ">=18.0.0"

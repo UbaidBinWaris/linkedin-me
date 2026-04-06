@@ -24,17 +24,23 @@ const path     = require('path');
 const fs       = require('fs');
 
 const { createSession }         = require('./src/browser/session');
-const { getFeedPostsBatch, parseEngagement } = require('./src/linkedin/feed');
+const { getFeedPostsBatch, parseEngagement, normalizePostText } = require('./src/linkedin/feed');
 const { shouldSkip, compositeScore } = require('./src/linkedin/filters');
 const { postComment }            = require('./src/linkedin/commenter');
 const { generateComment }        = require('./src/ai/gemini');
 const { pickRandomStyle, getStyleMemory } = require('./src/ai/commentStyles');
 const {
   extractPostId,
-  readCommentedPosts,
-  writeCommentedPost,
   ensureDataFiles,
+  parseCSVLine,
 } = require('./src/data/csv');
+const {
+  acquirePostLock,
+  saveComment,
+  releaseLock,
+  loadCommentedCache,
+  loadRecentAuthorsFromDb,
+} = require('./src/data/postLock');
 const { logCommentPerformance, getSummary: getLearningStats } = require('./src/data/learning');
 const config = require('./src/config');
 
@@ -73,30 +79,10 @@ function readingPause(postText) {
 }
 
 // ─────────────────────────────────────────────────────────────────
-//  AUTHOR DEDUP — skip same author commented within 7 days
+//  AUTHOR DEDUP — now served from PostgreSQL via loadRecentAuthorsFromDb
+//  (imported from src/data/postLock.js).
+//  This stub is kept so call sites don't need to change.
 // ─────────────────────────────────────────────────────────────────
-
-async function loadRecentAuthors() {
-  try {
-    const filePath = config.data.commentedPostsPath;
-    if (!fs.existsSync(filePath)) return new Set();
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const lines   = content.trim().split('\n').slice(1); // skip header
-    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
-    const recentAuthors = new Set();
-
-    for (const line of lines) {
-      const cols = line.split(',');
-      const author    = (cols[1] || '').replace(/^"|"$/g, '').trim();
-      const timestamp = (cols[3] || '').replace(/^"|"$/g, '').trim();
-      if (!author || !timestamp) continue;
-      if (new Date(timestamp).getTime() > sevenDaysAgo) {
-        recentAuthors.add(author.toLowerCase());
-      }
-    }
-    return recentAuthors;
-  } catch { return new Set(); }
-}
 
 // ─────────────────────────────────────────────────────────────────
 //  MAIN
@@ -122,21 +108,21 @@ async function main() {
   if (hasOpenAI) success('AI provider: OpenAI (primary)');
   else           success('AI provider: Gemini');
 
-  // ── Step 2: Prepare data files ───────────────────────────────────
-  logStep(2, 'Preparing data files');
-  ensureDataFiles();
-  let { ids: commentedIds, urls: commentedFullUrls } = await readCommentedPosts();
-  const recentAuthors = await loadRecentAuthors();
-  success(`Loaded ${commentedIds.size} previously commented post(s) for deduplication.`);
-  success(`Loaded ${recentAuthors.size} recently contacted author(s) (7-day cooldown).`);
+  // ── Step 2: Connect to PostgreSQL + Redis, load startup caches ──
+  logStep(2, 'Connecting to PostgreSQL & Redis — loading dedup cache');
+  ensureDataFiles(); // still creates the CSV data dir for learning logs
+  let { ids: commentedIds, urls: commentedFullUrls } = await loadCommentedCache();
+  const recentAuthors = await loadRecentAuthorsFromDb();
+  success(`PostgreSQL: ${commentedIds.size} previously commented post(s) loaded.`);
+  success(`Author cooldown: ${recentAuthors.size} author(s) in 7-day cooldown.`);
   try { success(`Learning: ${getLearningStats()}`); } catch { /* first run */ }
 
   // ── Step 3: Natural inactivity check ────────────────────────────
   logStep(3, 'Natural inactivity check');
-  // 25% chance to skip for the day — humans don't comment every day
-  if (Math.random() < 0.25) {
-    log('Skipping this run — natural inactivity day. (25% chance)');
-    log('Re-run to try again, or this is normal. Humans are inconsistent.');
+  // 10% chance to skip — reduced from 25% so the bot actually runs most of the time
+  if (Math.random() < 0.10) {
+    log('Skipping this run — natural inactivity day. (10% chance)');
+    log('Re-run to try again.');
     console.log('');
     process.exit(0);
   }
@@ -188,13 +174,13 @@ async function main() {
         consecutiveEmptyBatches = 0;
         scrollPasses = 5;  // reset scroll depth after reload
 
-        // ── IMPORTANT: clear the run-level seen-URL cache ──
-        // After a full page reload LinkedIn shows a fresh set of posts.
-        // Keep only IDs that are permanently commented (commentedIds) so
-        // we don't skip whatever new posts appear after the reload.
+        // ── Clear run-level URL cache (but NOT text cache) ──
+        // runSeenUrls: remove IDs that were only "seen" (not actually commented).
+        //   Commented IDs stay so we never re-attempt them even after reload.
+        // runSeenTexts: NEVER clear — it is the last line of defense against the
+        //   same post re-appearing with a different URL format after reload.
         const toRemove = [...runSeenUrls].filter(id => !commentedIds.has(id));
         toRemove.forEach(id => runSeenUrls.delete(id));
-        runSeenTexts.clear();
         log(`  ↺ Cleared ${toRemove.length} temporary seen-IDs (${runSeenUrls.size} permanent remain).`);
       }
       
@@ -237,9 +223,13 @@ async function main() {
         }
         runSeenUrls.add(postId);
         
-        const textKey = post.postText.slice(0, 60);
+        // Text-only key (no author name) — same normalization as feed.js dedup().
+        // Author name is intentionally excluded: "John Doe" vs "John Doe • 2nd+"
+        // from different scraping passes would generate different keys and allow
+        // the same post through twice.
+        const textKey = normalizePostText(post.postText).slice(0, 80);
         if (runSeenTexts.has(textKey)) {
-          console.log(`  [SKIP] runSeenTexts: ${textKey.replace(/\n/g, ' ')}`);
+          console.log(`  [SKIP] runSeenTexts: ${textKey.slice(0, 60)}`);
           continue;
         }
         runSeenTexts.add(textKey);
@@ -257,8 +247,13 @@ async function main() {
           continue;
         }
         
-        // 7-day cooldown
-        if (recentAuthors.has((post.authorName || '').toLowerCase())) {
+        // 7-day cooldown — strip LinkedIn suffixes ("• 2nd+", "• 3rd+", "· 1st")
+        // before comparing so "John Doe • 2nd+" matches stored "John Doe".
+        const authorKey = (post.authorName || '')
+          .replace(/\s*[•·]\s*(1st|2nd|3rd|\d+st|\d+nd|\d+rd|\d+th)[\+]?\s*$/i, '')
+          .trim()
+          .toLowerCase();
+        if (recentAuthors.has(authorKey)) {
           console.log(`  [SKIP] 7-day cooldown: ${post.authorName}`);
           continue;
         }
@@ -323,58 +318,85 @@ async function main() {
 
           // Step 10: Post comment
           logStep(10, 'Posting comment on LinkedIn');
-          try {
-            // ── Last-minute safety guard: re-read CSV from disk right before posting ──
-            // Catches any race condition where another run wrote this URL since we loaded.
-            const preCheck = await readCommentedPosts();
-            if (preCheck.ids.has(postId) || preCheck.urls.has(normalizedUrl)) {
-              warn(`   [!] Skipped — URL was already saved to CSV (detected pre-post): ${postId}`);
-              commentedIds      = preCheck.ids;
-              commentedFullUrls = preCheck.urls;
-              continue;
-            }
-            commentedIds      = preCheck.ids;
-            commentedFullUrls = preCheck.urls;
 
-            const posted = await postComment(page, post.postUrl, result.comment);
-            
+          // ── Steps 1–3: DB check → Redis lock → DB double-check ──────────────
+          // acquirePostLock() runs all three checks atomically before we touch
+          // the browser. If ANY check fails → skip with zero side-effects.
+          log('   [Lock] Acquiring Redis lock + PostgreSQL pre-check...');
+          const lockResult = await acquirePostLock(postId).catch((e) => {
+            warn(`   [!] Lock error: ${e.message.slice(0, 80)}`);
+            return { locked: false, reason: 'lock system error' };
+          });
+
+          if (!lockResult.locked) {
+            warn(`   [!] Skipped — ${lockResult.reason}: ${postId}`);
+            commentedIds.add(postId);
+            commentedFullUrls.add(normalizedUrl);
+            continue; // → next post in batch
+          }
+          log('   [Lock] Lock acquired. Proceeding to comment.');
+
+          // Lock is held — use try/finally to guarantee release
+          let posted = false;
+          try {
+            // ── Step 4: Comment on LinkedIn ────────────────────────────────────
+            posted = await postComment(page, post.postUrl, result.comment);
+
+            // Block this author for the 7-day cooldown regardless of result.
+            // The lock prevents a second attempt on this post; the author block
+            // prevents attempts on other posts by the same person in this run.
+            recentAuthors.add(
+              (post.authorName || '')
+                .replace(/\s*[•·]\s*(1st|2nd|3rd|\d+st|\d+nd|\d+rd|\d+th)\+?\s*$/i, '')
+                .trim()
+                .toLowerCase()
+            );
+
             if (posted) {
-              success(`   Posted! Saved to CSV.`);
-              await writeCommentedPost(post.postUrl, post.authorName, result.comment, post.profileUrl);
-              // Update in-memory sets immediately so next iterations skip this post
+              // ── Step 5: Save to PostgreSQL ─────────────────────────────────
+              // Only save on confirmed success. A duplicate-key error here
+              // means another process sneaked in — treated as success (upsert).
+              await saveComment({
+                postId,
+                postUrl:     post.postUrl,
+                authorName:  post.authorName,
+                commentText: result.comment,
+              });
               commentedIds.add(postId);
               commentedFullUrls.add(normalizedUrl);
-              recentAuthors.add((post.authorName || '').toLowerCase());
+
+              success(`   Posted! Saved to PostgreSQL.`);
               commentsMade++;
 
               // Track for self-learning
               try {
                 logCommentPerformance({
-                  postUrl: post.postUrl,
-                  authorName: post.authorName,
-                  authorHeadline: post.authorHeadline || '',
-                  comment: result.comment,
-                  style: style.id,
-                  type: '',
+                  postUrl:              post.postUrl,
+                  authorName:           post.authorName,
+                  authorHeadline:       post.authorHeadline || '',
+                  comment:              result.comment,
+                  style:                style.id,
+                  type:                 '',
                   score,
-                  bestAngle: result.bestAngle || '',
+                  bestAngle:            result.bestAngle || '',
                   existingCommentCount: (post.commentsData || []).length,
-                  authorCountry: '',
-                  postFormat: post.postFormat || 'text',
+                  authorCountry:        '',
+                  postFormat:           post.postFormat || 'text',
                 });
               } catch (learnErr) {
                 warn(`   [!] Learning log failed: ${learnErr.message.slice(0, 60)}`);
               }
-
-              // Re-read from disk once more to stay fully in sync
-              const fresh = await readCommentedPosts();
-              commentedIds       = fresh.ids;
-              commentedFullUrls  = fresh.urls;
             } else {
-              warn('   [!] Failed to post comment on page.');
+              warn('   [!] Post attempt failed. NOT saved to database — can be retried next run.');
             }
-          } catch(e) {
+          } catch (e) {
             warn(`   [!] Page interaction error: ${e.message.slice(0, 100)}`);
+            // Do NOT save to DB — the comment may not have been posted.
+          } finally {
+            // ── Step 6: Release Redis lock ─────────────────────────────────────
+            // Runs unconditionally — even on thrown errors or process interrupts.
+            await releaseLock(postId).catch(() => {});
+            log('   [Lock] Redis lock released.');
           }
 
           // Ensure we are back on the feed for the next iteration
@@ -383,20 +405,25 @@ async function main() {
               await page.goto('https://www.linkedin.com/feed/', { waitUntil: 'domcontentloaded', timeout: 30000 });
             }
           } catch { /* page may be closed — next iteration's ensureOnFeed will recover */ }
-          await delay(3000, 5000);
 
-          log(`   Taking a break before continuing the hunt...`);
-          const breakMinMin = config.bot.interCommentBreakMinMin;
-          const breakMaxMin = config.bot.interCommentBreakMaxMin;
-          const range = Math.max(1, breakMaxMin - breakMinMin);
-          const minutesToWait = breakMinMin + Math.floor(Math.random() * (range + 1));
-          const breakMs = minutesToWait * 60 * 1000 + Math.floor(Math.random() * 30000);
-          log(`   Pausing for ~${minutesToWait} min (range ${breakMinMin}–${breakMaxMin} from .env) to seem human.`);
-          await new Promise(r => setTimeout(r, breakMs));
-
-          // After posting, reset stuck state so next round starts fresh
+          // Reset stuck state regardless of whether posting succeeded or failed
           consecutiveEmptyBatches = 0;
           scrollPasses = 5;
+
+          if (posted) {
+            await delay(3000, 5000);
+            log(`   Taking a break before continuing the hunt...`);
+            const breakMinMin = config.bot.interCommentBreakMinMin;
+            const breakMaxMin = config.bot.interCommentBreakMaxMin;
+            const range = Math.max(1, breakMaxMin - breakMinMin);
+            const minutesToWait = breakMinMin + Math.floor(Math.random() * (range + 1));
+            const breakMs = minutesToWait * 60 * 1000 + Math.floor(Math.random() * 30000);
+            log(`   Pausing for ~${minutesToWait} min (range ${breakMinMin}–${breakMaxMin} from .env) to seem human.`);
+            await new Promise(r => setTimeout(r, breakMs));
+          } else {
+            // Failed attempt — short pause then resume searching immediately
+            await delay(3000, 5000);
+          }
         }
       } // end for (postsBatch)
 

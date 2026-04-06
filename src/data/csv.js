@@ -211,4 +211,5 @@ module.exports = {
   readTodayCommentedCount,
   writeCommentedPost,
   readTargetProfiles,
+  parseCSVLine,
 };

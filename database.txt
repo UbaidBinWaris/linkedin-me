@@ -1,0 +1,29 @@
+CREATE USER linkedindatabase WITH PASSWORD 'ubaid123@';
+CREATE DATABASE databasebot;
+GRANT ALL PRIVILEGES ON DATABASE databasebot TO linkedindatabase;
+
+
+
+\c databasebot
+
+GRANT ALL ON SCHEMA public TO linkedindatabase;
+ALTER DATABASE databasebot OWNER TO linkedindatabase;
+
+
+
+GRANT ALL ON SCHEMA public TO linkedindatabase;
+GRANT ALL ON SCHEMA public TO linkedindatabase;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO linkedindatabase;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO linkedindatabase;
+GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO linkedindatabase;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT ALL ON TABLES TO linkedindatabase;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT ALL ON SEQUENCES TO linkedindatabase;
+
+ALTER DEFAULT PRIVILEGES IN SCHEMA public
+GRANT ALL ON FUNCTIONS TO linkedindatabase;
+
+ALTER DATABASE databasebot OWNER TO linkedindatabase;
