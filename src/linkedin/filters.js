@@ -161,6 +161,12 @@ function isJobPost(postText = '') {
 function isSentimentPost(postText = '') {
   return hasAny(lc('', '', postText.slice(0, 600)), SENTIMENT_SKIP_SIGNALS);
 }
+
+/** Promoted/sponsored ads should never be auto-commented. */
+function isPromotedPost(authorHeadline = '', postText = '') {
+  const t = lc('', authorHeadline, (postText || '').slice(0, 400));
+  return /\b(promoted|sponsored|advertisement)\b/i.test(t);
+}
 /** Check if author is from a non-target country (based on headline/location signals) */
 function isNonTargetCountry(authorHeadline = '') {
   return hasAny(lc('', '', authorHeadline), NON_TARGET_COUNTRY_SIGNALS);
@@ -184,6 +190,8 @@ function shouldSkip(authorName = '', authorHeadline = '', postText = '') {
     return { skip: true, reason: 'Author appears to be a student / junior' };
   if (isJobPost(postText))
     return { skip: true, reason: 'Post is a job advertisement' };
+  if (isPromotedPost(authorHeadline, postText))
+    return { skip: true, reason: 'Promoted/sponsored post (ad)' };
   if (isNonTargetCountry(authorHeadline))
     return { skip: true, reason: 'Author is from a non-target country (not a lead)' };
   if (isSentimentPost(postText))

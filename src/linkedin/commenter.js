@@ -110,21 +110,213 @@ async function likeCard(page, cardIndex) {
 }
 
 async function clickCommentButton(page, cardIndex) {
-  return page.evaluate((idx) => {
-    const cards = document.querySelectorAll('[role="listitem"][componentkey*="FeedType_"]');
-    const card = cards[idx];
-    if (!card) return false;
-    const btns = [...card.querySelectorAll('button')];
-    for (const btn of btns) {
-      const label = (btn.getAttribute('aria-label') || btn.innerText || '').toLowerCase();
-      if (label.includes('comment')) { btn.click(); return true; }
-    }
-    // SVG-based: button containing a comment-type SVG
-    for (const btn of btns) {
-      if (btn.querySelector('svg[id*="comment"], use[href*="comment"]')) { btn.click(); return true; }
+  const card = page.locator('[role="listitem"][componentkey*="FeedType_"]').nth(cardIndex);
+
+  const editorSelectors = [
+    '.ql-editor[contenteditable="true"]',
+    '[contenteditable="true"][data-placeholder*="comment" i]',
+    '[contenteditable="true"][data-placeholder*="Add a comment" i]',
+    '[contenteditable="true"][aria-label*="comment" i]',
+    '.comments-comment-box__form [contenteditable="true"]',
+    '.comments-comment-texteditor [contenteditable="true"]',
+  ].join(', ');
+
+  const isComposerOpen = async () => {
+    return card.locator(editorSelectors).first().isVisible({ timeout: 700 }).catch(() => false);
+  };
+
+  // Already open in this card.
+  if (await isComposerOpen()) return true;
+
+  const clickNativeButtonInCard = async () => {
+    const candidates = [
+      card.locator('button[aria-label*="comment" i]'),
+      card.locator('button').filter({ hasText: 'Comment' }),
+      card.locator('button:has(svg[id*="comment"])'),
+      card.locator('button:has(use[href*="comment"])'),
+    ];
+
+    for (const group of candidates) {
+      const btn = group.first();
+      if (await btn.isVisible({ timeout: 600 }).catch(() => false)) {
+        await btn.click({ timeout: 1500 }).catch(() => {});
+        return true;
+      }
     }
     return false;
-  }, cardIndex);
+  };
+
+  const clickWrapperFallback = async () => {
+    return page.evaluate((idx) => {
+      const cards = document.querySelectorAll('[role="listitem"][componentkey*="FeedType_"]');
+      const cardEl = cards[idx];
+      if (!cardEl) return false;
+      const btns = [...cardEl.querySelectorAll('button')];
+      let target = null;
+      for (const btn of btns) {
+        const label = (btn.getAttribute('aria-label') || btn.innerText || '').toLowerCase();
+        if (label.includes('comment') || btn.querySelector('svg[id*="comment"], use[href*="comment"]')) {
+          target = btn;
+          break;
+        }
+      }
+      if (!target) return false;
+      target.click();
+      const wrap = target.closest('div[role="button"], span, div, li');
+      if (wrap) wrap.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+      return true;
+    }, cardIndex).catch(() => false);
+  };
+
+  // Retry a few times because LinkedIn sometimes requires a second click
+  // (button + blue wrapper activation) before the composer appears.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const clicked = await clickNativeButtonInCard();
+    if (clicked) {
+      await sleep(500);
+      if (await isComposerOpen()) return true;
+    }
+
+    await clickWrapperFallback();
+    await sleep(500);
+    if (await isComposerOpen()) return true;
+  }
+
+  return false;
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  Card-scoped composer helpers (prevents typing into stale editors)
+// ─────────────────────────────────────────────────────────────────
+
+async function typeAndSubmitOnCard(page, cardIndex, commentText) {
+  const card = page.locator('[role="listitem"][componentkey*="FeedType_"]').nth(cardIndex);
+
+  const editorSelectors = [
+    '.ql-editor[contenteditable="true"]',
+    '[contenteditable="true"][data-placeholder*="comment" i]',
+    '[contenteditable="true"][data-placeholder*="Add a comment" i]',
+    '[contenteditable="true"][aria-label*="comment" i]',
+    '.comments-comment-box__form [contenteditable="true"]',
+    '.comments-comment-texteditor [contenteditable="true"]',
+  ].join(', ');
+
+  // Wait briefly for the inline composer to appear in THIS card.
+  const editor = card.locator(editorSelectors).first();
+  const visible = await editor.isVisible({ timeout: 3000 }).catch(() => false);
+  if (!visible) return false;
+
+  await editor.click();
+  await sleep(200);
+  await page.keyboard.press('Control+a');
+  await sleep(100);
+  await page.keyboard.press('Delete');
+  await sleep(120);
+  await editor.type(commentText, { delay: 45 + Math.random() * 40 });
+  await sleep(900);
+
+  const typed = (await editor.innerText().catch(() => '')).trim();
+  if (typed.length < 10) {
+    console.log('    ⚠️  Text did not register in scoped card editor');
+    return false;
+  }
+
+  // Click submit from the active editor container, not the feed action bar.
+  const submitted = await page.evaluate((idx) => {
+    const cards = document.querySelectorAll('[role="listitem"][componentkey*="FeedType_"]');
+    const cardEl = cards[idx];
+    if (!cardEl) return false;
+
+    const editors = [...cardEl.querySelectorAll('[contenteditable="true"]')]
+      .filter((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 30 && r.height > 10;
+      });
+    if (!editors.length) return false;
+
+    const editor = editors[editors.length - 1];
+    let container = editor.parentElement;
+    for (let i = 0; i < 14 && container; i++) {
+      const btns = [...container.querySelectorAll('button')].filter((b) => {
+        const r = b.getBoundingClientRect();
+        return r.width > 10 && r.height > 10 && b.offsetParent !== null;
+      });
+
+      for (const btn of btns) {
+        const label = (btn.getAttribute('aria-label') || btn.innerText || '').trim().toLowerCase();
+        const hasEditorInside = !!btn.querySelector('[contenteditable="true"]');
+        if (hasEditorInside) continue;
+
+        // Strictly allow composer submit buttons only.
+        if (
+          label === 'comment' ||
+          label === 'post comment' ||
+          label === 'submit comment' ||
+          label === 'post'
+        ) {
+          btn.click();
+          return label || true;
+        }
+      }
+      container = container.parentElement;
+    }
+    return false;
+  }, cardIndex).catch(() => false);
+
+  if (submitted) {
+    console.log('    ✓ Submitted (composer-scoped button)');
+    return true;
+  }
+
+  // Final scoped fallback: Enter while focused in this card editor.
+  await editor.click();
+  await sleep(120);
+  await page.keyboard.press('Enter');
+  console.log('    ⚠️  Submitted via Enter fallback (scoped card editor)');
+  return true;
+}
+
+async function verifyCommentPostedOnCard(page, cardIndex, commentText) {
+  const snippet = (commentText || '').slice(0, 40).toLowerCase();
+  if (!snippet) return false;
+
+  for (let i = 0; i < 4; i++) {
+    await sleep(900);
+
+    const state = await page.evaluate(({ idx, needle }) => {
+      const cards = document.querySelectorAll('[role="listitem"][componentkey*="FeedType_"]');
+      const card = cards[idx];
+      if (!card) return { hasInEditor: false, hasOutsideEditor: false, editorTextLen: 0 };
+
+      const editors = [...card.querySelectorAll('[contenteditable="true"], textarea, input[type="text"]')];
+      const editorText = editors.map((el) => (el.innerText || el.value || '')).join(' ').toLowerCase();
+      const hasInEditor = editorText.includes(needle);
+
+      // Clone and remove editors to avoid counting draft text as "posted".
+      const clone = card.cloneNode(true);
+      clone.querySelectorAll('[contenteditable="true"], textarea, input[type="text"]').forEach((el) => el.remove());
+      const visibleText = (clone.innerText || '').toLowerCase();
+      const hasOutsideEditor = visibleText.includes(needle);
+
+      // Strong signal: newly added comment appears inside comment list area.
+      const commentListsText = [...card.querySelectorAll('[data-testid*="commentLists" i], [componentkey*="commentLists" i], [componentkey*="commentsSection" i]')]
+        .map((el) => (el.innerText || '').toLowerCase())
+        .join(' ');
+      const hasInCommentList = commentListsText.includes(needle);
+
+      return { hasInEditor, hasOutsideEditor, hasInCommentList, editorTextLen: editorText.trim().length };
+    }, { idx: cardIndex, needle: snippet }).catch(() => ({ hasInEditor: false, hasOutsideEditor: false, editorTextLen: 0 }));
+
+    // If text is still in editor, treat as not posted.
+    if (state.hasInEditor) return false;
+
+    if (state.hasInCommentList || state.hasOutsideEditor) return true;
+
+    // If composer cleared and no outside text yet, allow one more retry cycle.
+    if (!state.hasInEditor && state.editorTextLen === 0 && i >= 2) return true;
+  }
+
+  return false;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -371,6 +563,18 @@ async function postComment(page, postUrl, commentText) {
         console.log(`    ✓ Found card at index ${cardIdx} — staying on feed`);
         await scrollCardIntoView(page, cardIdx);
 
+        // Dismiss any previously open inline composer from older cards.
+        // LinkedIn sometimes keeps stale drafts open across feed interactions.
+        await page.keyboard.press('Escape').catch(() => {});
+        await sleep(120);
+        await page.keyboard.press('Escape').catch(() => {});
+        await sleep(120);
+        await page.evaluate((idx) => {
+          const cards = document.querySelectorAll('[role="listitem"][componentkey*="FeedType_"]');
+          cards[idx]?.scrollIntoView({ behavior: 'instant', block: 'center' });
+        }, cardIdx).catch(() => {});
+        await sleep(180);
+
         // Like
         const liked = await likeCard(page, cardIdx);
         if (liked) { console.log('    👍 Post liked'); await sleep(900); }
@@ -428,23 +632,25 @@ async function postComment(page, postUrl, commentText) {
           }
         }
 
-        // Type + submit (works on both feed card inline box and post-page box)
-        const submitted = await typeAndSubmit(page, commentText);
-        if (!submitted) {
+        // Type + submit in THIS card only (prevents stale-editor cross-posting).
+        const submitted = await typeAndSubmitOnCard(page, cardIdx, commentText);
+        // On feed cards, do NOT fall back to global composer selection,
+        // otherwise we may type into a stale editor from a previous post.
+        const submittedFinal = stillOnFeed
+          ? submitted
+          : (submitted || await typeAndSubmit(page, commentText));
+        if (!submittedFinal) {
           console.log('    ⚠️  No comment box found');
           return false;
         }
 
-        await sleep(3500);
-
-        // Verify
-        const snippet  = commentText.slice(0, 40).toLowerCase();
-        const pageText = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
-        if (pageText.includes(snippet)) {
-          console.log('    ✓ Comment verified in page'); return true;
+        const ok = await verifyCommentPostedOnCard(page, cardIdx, commentText);
+        if (ok) {
+          console.log('    ✓ Comment verified in current card');
+          return true;
         }
-        console.log('    ✓ Submitted (verification: text not yet visible in DOM)');
-        return true;
+        console.log('    ⚠️  Comment not verified on current card (likely still draft)');
+        return false;
       }
 
       console.log(`    ⚠️  Card not found in feed — falling back to page navigation`);

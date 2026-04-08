@@ -24,10 +24,56 @@
 
 const prisma = require('./db');
 const redis  = require('./redis');
+const { extractPostId, normalizeLinkedInPostUrl } = require('./csv');
 
 // Redis lock configuration
 const LOCK_PREFIX = 'lock:post:';
 const LOCK_TTL_MS = 90_000; // 90 seconds — covers the full comment lifecycle
+
+// Lazily-initialized promise so table bootstrap runs once per process.
+let ensureCommentedPostsTablePromise = null;
+
+/**
+ * Creates the commented_posts table/indexes if they do not exist.
+ * This prevents startup crashes on fresh databases where Prisma schema
+ * was not pushed yet.
+ */
+async function ensureCommentedPostsTable() {
+  if (!ensureCommentedPostsTablePromise) {
+    ensureCommentedPostsTablePromise = (async () => {
+      await prisma.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "commented_posts" (
+          "id" SERIAL PRIMARY KEY,
+          "postId" TEXT NOT NULL,
+          "postUrl" TEXT,
+          "authorName" TEXT,
+          "commentText" TEXT,
+          "commentedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+
+      await prisma.$executeRawUnsafe(`
+        CREATE UNIQUE INDEX IF NOT EXISTS "commented_posts_postId_key"
+        ON "commented_posts" ("postId")
+      `);
+
+      await prisma.$executeRawUnsafe(`
+        CREATE INDEX IF NOT EXISTS "commented_posts_postId_idx"
+        ON "commented_posts" ("postId")
+      `);
+
+      await prisma.$executeRawUnsafe(`
+        CREATE INDEX IF NOT EXISTS "commented_posts_commentedAt_idx"
+        ON "commented_posts" ("commentedAt")
+      `);
+    })().catch((err) => {
+      ensureCommentedPostsTablePromise = null;
+      throw err;
+    });
+  }
+
+  await ensureCommentedPostsTablePromise;
+}
 
 // ─────────────────────────────────────────────────────────────────
 //  INTERNAL HELPERS
@@ -40,6 +86,7 @@ const lockKey = (postId) => `${LOCK_PREFIX}${postId}`;
  * Returns true if this postId has already been recorded.
  */
 async function isAlreadyCommented(postId) {
+  await ensureCommentedPostsTable();
   const row = await prisma.commentedPost.findUnique({
     where:  { postId },
     select: { id: true }, // minimal projection — we only need existence
@@ -103,12 +150,40 @@ async function acquirePostLock(postId) {
  * gracefully — no exception, no retry needed.
  */
 async function saveComment({ postId, postUrl, authorName, commentText }) {
+  await ensureCommentedPostsTable();
+  const normalizedUrl = postUrl ? normalizeLinkedInPostUrl(postUrl) : null;
+  const canonicalPostId = extractPostId(postId || normalizedUrl || '');
   await prisma.commentedPost.upsert({
-    where:  { postId },
+    where:  { postId: canonicalPostId },
     update: {},   // already exists → treat as success, touch nothing
     create: {
-      postId,
-      postUrl:     postUrl     || null,
+      postId:      canonicalPostId,
+      postUrl:     normalizedUrl || null,
+      authorName:  authorName  || null,
+      commentText: commentText || null,
+    },
+  });
+}
+
+/**
+ * markPostAttempted({ postId, postUrl, authorName, commentText })
+ *
+ * Permanently blocks a post ID after any comment attempt where outcome is
+ * uncertain (for example, browser crash after submit click).
+ *
+ * This is intentionally conservative: if we are not 100% sure, we skip the
+ * post forever to eliminate duplicate-comment risk.
+ */
+async function markPostAttempted({ postId, postUrl, authorName, commentText }) {
+  await ensureCommentedPostsTable();
+  const normalizedUrl = postUrl ? normalizeLinkedInPostUrl(postUrl) : null;
+  const canonicalPostId = extractPostId(postId || normalizedUrl || '');
+  await prisma.commentedPost.upsert({
+    where:  { postId: canonicalPostId },
+    update: {},
+    create: {
+      postId:      canonicalPostId,
+      postUrl:     normalizedUrl || null,
       authorName:  authorName  || null,
       commentText: commentText || null,
     },
@@ -136,6 +211,7 @@ async function releaseLock(postId) {
  * Returns: { ids: Set<string>, urls: Set<string> }
  */
 async function loadCommentedCache() {
+  await ensureCommentedPostsTable();
   const rows = await prisma.commentedPost.findMany({
     select: { postId: true, postUrl: true },
   });
@@ -144,10 +220,14 @@ async function loadCommentedCache() {
   const urls = new Set();
 
   for (const row of rows) {
-    if (row.postId) ids.add(row.postId);
+    if (row.postId) {
+      ids.add(row.postId);
+      ids.add(extractPostId(row.postId));
+    }
     if (row.postUrl) {
-      const normalized = row.postUrl.replace(/\/+$/, '');
+      const normalized = normalizeLinkedInPostUrl(row.postUrl);
       urls.add(normalized);
+      ids.add(extractPostId(normalized));
     }
   }
 
@@ -161,6 +241,7 @@ async function loadCommentedCache() {
  * in the last `days` days.  Used for the per-author cooldown check.
  */
 async function loadRecentAuthorsFromDb(days = 7) {
+  await ensureCommentedPostsTable();
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
   const rows = await prisma.commentedPost.findMany({
@@ -185,6 +266,7 @@ async function loadRecentAuthorsFromDb(days = 7) {
 module.exports = {
   acquirePostLock,
   saveComment,
+  markPostAttempted,
   releaseLock,
   loadCommentedCache,
   loadRecentAuthorsFromDb,

@@ -11,6 +11,21 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+enum ContactStatus {
+  NEW
+  READY_TO_MESSAGE
+  MESSAGED
+  FOLLOW_UP_DUE
+  REPLIED
+  CLOSED
+}
+
+enum ContactTag {
+  RECRUITER
+  DEVELOPER
+  FOUNDER
+}
+
 // ─────────────────────────────────────────────────────────────────
 //  CommentedPost — permanent record of every comment attempt
 //
@@ -31,4 +46,27 @@ model CommentedPost {
   @@index([postId])
   @@index([commentedAt])
   @@map("commented_posts")
+}
+
+model Contact {
+  id              String        @id @default(uuid())
+  name            String
+  role            String
+  company         String
+  location        String
+  linkedinUrl     String        @unique
+  notes           String?
+  status          ContactStatus @default(NEW)
+  tag             ContactTag?
+  firstMessage    String?
+  followUpMessage String?
+  lastMessageAt   DateTime?
+  followUpDueAt   DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([status])
+  @@index([followUpDueAt])
+  @@index([createdAt])
+  @@map("contacts")
 }

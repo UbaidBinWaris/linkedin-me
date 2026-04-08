@@ -31,12 +31,14 @@ const { generateComment }        = require('./src/ai/gemini');
 const { pickRandomStyle, getStyleMemory } = require('./src/ai/commentStyles');
 const {
   extractPostId,
+  normalizeLinkedInPostUrl,
   ensureDataFiles,
   parseCSVLine,
 } = require('./src/data/csv');
 const {
   acquirePostLock,
   saveComment,
+  markPostAttempted,
   releaseLock,
   loadCommentedCache,
   loadRecentAuthorsFromDb,
@@ -216,7 +218,7 @@ async function main() {
         
         // dedup within run
         const postId = extractPostId(post.postUrl);
-        const normalizedUrl = post.postUrl.replace(/\/+$/, '');
+        const normalizedUrl = normalizeLinkedInPostUrl(post.postUrl);
         if (runSeenUrls.has(postId)) {
           console.log(`  [SKIP] runSeenUrls: ${postId}`);
           continue;
@@ -241,6 +243,12 @@ async function main() {
         }
         
         // hard filters
+        // Skip promoted/sponsored posts entirely (ads have unstable comment UX).
+        if (/\b(promoted|sponsored)\b/i.test(post.cardText || '')) {
+          console.log(`  [SKIP] promoted/sponsored post: ${post.authorName}`);
+          continue;
+        }
+
         const { skip, reason } = shouldSkip(post.authorName, post.authorHeadline, post.postText);
         if (skip) {
           console.log(`  [SKIP] filter (${reason}): ${post.authorName}`);
@@ -387,11 +395,34 @@ async function main() {
                 warn(`   [!] Learning log failed: ${learnErr.message.slice(0, 60)}`);
               }
             } else {
-              warn('   [!] Post attempt failed. NOT saved to database — can be retried next run.');
+              // Conservative mode: once we attempted this post, block it forever
+              // to prevent accidental duplicate comments on future runs.
+              await markPostAttempted({
+                postId,
+                postUrl:     post.postUrl,
+                authorName:  post.authorName,
+                commentText: result.comment,
+              });
+              commentedIds.add(postId);
+              commentedFullUrls.add(normalizedUrl);
+              warn('   [!] Post attempt failed/uncertain. Marked in PostgreSQL to never retry this post.');
             }
           } catch (e) {
             warn(`   [!] Page interaction error: ${e.message.slice(0, 100)}`);
-            // Do NOT save to DB — the comment may not have been posted.
+            // Conservative mode: outcome is uncertain, so block this post forever.
+            try {
+              await markPostAttempted({
+                postId,
+                postUrl:     post.postUrl,
+                authorName:  post.authorName,
+                commentText: result.comment,
+              });
+              commentedIds.add(postId);
+              commentedFullUrls.add(normalizedUrl);
+              warn('   [!] Uncertain outcome recorded. This post is now permanently skipped.');
+            } catch (persistErr) {
+              warn(`   [!] Could not persist uncertain attempt: ${persistErr.message.slice(0, 80)}`);
+            }
           } finally {
             // ── Step 6: Release Redis lock ─────────────────────────────────────
             // Runs unconditionally — even on thrown errors or process interrupts.

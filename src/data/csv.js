@@ -35,14 +35,52 @@ function ensureDataFiles() {
 }
 
 /**
- * Extracts the 19-digit LinkedIn Activity ID from a URL or string.
+ * Normalizes a LinkedIn post URL so different URL variants map to one key.
+ * - strips query/hash
+ * - strips trailing slash
+ * - lowercases scheme + host
+ *
+ * Non-URL strings are returned trimmed as-is.
+ * @param {string} input
+ * @returns {string}
+ */
+function normalizeLinkedInPostUrl(input) {
+  if (!input) return '';
+  const raw = String(input).trim();
+  try {
+    const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://www.linkedin.com${raw.startsWith('/') ? '' : '/'}${raw}`;
+    const u = new URL(withProtocol);
+    const pathname = (u.pathname || '').replace(/\/+$/, '');
+    return `${u.protocol.toLowerCase()}//${u.host.toLowerCase()}${pathname}`;
+  } catch {
+    return raw.replace(/[?#].*$/, '').replace(/\/+$/, '');
+  }
+}
+
+/**
+ * Extracts the LinkedIn Activity ID from URL or text.
+ * Supports multiple LinkedIn variants:
+ * - /feed/update/urn:li:activity:123...
+ * - /posts/...-activity-123...
+ * - plain urn:li:activity:123...
+ * - fallback to any 15+ digit sequence
  * @param {string} url 
  * @returns {string} The ID, or the original URL if no ID is found.
  */
 function extractPostId(url) {
   if (!url) return '';
-  const match = url.match(/\d{19}/);
-  return match ? match[0] : url;
+  const normalized = normalizeLinkedInPostUrl(url);
+
+  const urnMatch = normalized.match(/urn:li:activity:(\d{15,})/i);
+  if (urnMatch) return urnMatch[1];
+
+  const activitySlug = normalized.match(/activity-(\d{15,})/i);
+  if (activitySlug) return activitySlug[1];
+
+  const digits = normalized.match(/\d{15,}/);
+  if (digits) return digits[0];
+
+  return normalized;
 }
 
 /**
@@ -75,7 +113,7 @@ async function readCommentedPosts() {
     }
     if (url) {
       // Normalize: strip trailing slash for consistent matching
-      const normalized = url.replace(/\/+$/, '');
+      const normalized = normalizeLinkedInPostUrl(url);
       urls.add(normalized);
       const id = extractPostId(normalized);
       if (id) ids.add(id);
@@ -207,6 +245,7 @@ function parseCSVLine(line) {
 module.exports = {
   ensureDataFiles,
   extractPostId,
+  normalizeLinkedInPostUrl,
   readCommentedPosts,
   readTodayCommentedCount,
   writeCommentedPost,
