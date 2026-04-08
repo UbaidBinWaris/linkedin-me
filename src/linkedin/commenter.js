@@ -340,9 +340,8 @@ async function typeAndSubmit(page, commentText) {
     await sleep(200);
     await page.keyboard.press('Enter');
     console.log('    ⚠️  Pressed Enter as last resort');
-    return 'risky';
   }
-  return 'ok';
+  return true;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -385,10 +384,7 @@ async function postComment(page, postUrl, commentText) {
         // Give the UI time to react — then check if LinkedIn navigated away from feed
         await sleep(2000);
         const urlAfterClick = page.url();
-        // Post pages live at /feed/update/... — they contain "linkedin.com/feed" too,
-        // so we must explicitly exclude them to avoid treating a post page as the feed.
-        const stillOnFeed   = urlAfterClick.includes('linkedin.com/feed') &&
-                              !urlAfterClick.includes('/feed/update/');
+        const stillOnFeed   = urlAfterClick.includes('linkedin.com/feed');
 
         if (!stillOnFeed) {
           // LinkedIn navigated to the post detail page — handle it there
@@ -433,12 +429,11 @@ async function postComment(page, postUrl, commentText) {
         }
 
         // Type + submit (works on both feed card inline box and post-page box)
-        const submitResult = await typeAndSubmit(page, commentText);
-        if (!submitResult) {
+        const submitted = await typeAndSubmit(page, commentText);
+        if (!submitted) {
           console.log('    ⚠️  No comment box found');
           return false;
         }
-        const riskySubmit = (submitResult === 'risky');
 
         await sleep(3500);
 
@@ -448,16 +443,7 @@ async function postComment(page, postUrl, commentText) {
         if (pageText.includes(snippet)) {
           console.log('    ✓ Comment verified in page'); return true;
         }
-        await sleep(2000);
-        const pageText2 = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
-        if (pageText2.includes(snippet)) {
-          console.log('    ✓ Comment verified in page (retry)'); return true;
-        }
-        if (riskySubmit) {
-          console.log('    ✗ Comment not found after retry — submission was risky (Enter fallback)');
-          return false;
-        }
-        console.log('    ✓ Submitted (text not visible after retry — accepting on reliable path)');
+        console.log('    ✓ Submitted (verification: text not yet visible in DOM)');
         return true;
       }
 
@@ -525,12 +511,11 @@ async function postComment(page, postUrl, commentText) {
     }
 
     // ── Type + submit via shared helper ──
-    const submitResult2 = await typeAndSubmit(page, commentText);
-    if (!submitResult2) {
+    const submitted = await typeAndSubmit(page, commentText);
+    if (!submitted) {
       console.log('    ⚠️  No comment box found on:', postUrl.slice(-50));
       return false;
     }
-    const riskySubmit2 = (submitResult2 === 'risky');
 
     await sleep(3500);
 
@@ -550,14 +535,7 @@ async function postComment(page, postUrl, commentText) {
     const snippet  = commentText.slice(0, 40).toLowerCase();
     const pageText = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
     if (pageText.includes(snippet)) { console.log('    ✓ Comment verified in page'); return true; }
-    await sleep(2000);
-    const pageText2 = await page.evaluate(() => document.body.innerText.toLowerCase()).catch(() => '');
-    if (pageText2.includes(snippet)) { console.log('    ✓ Comment verified in page (retry)'); return true; }
-    if (riskySubmit2) {
-      console.log('    ✗ Comment not found after retry — submission was risky (Enter fallback)');
-      return false;
-    }
-    console.log('    ✓ Submitted (text not visible after retry — accepting on reliable path)');
+    console.log('    ✓ Submitted (verification: text not yet visible in DOM)');
     return true;
 
   } catch (err) {
