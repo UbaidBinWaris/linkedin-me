@@ -24,7 +24,12 @@
 
 const prisma = require('./db');
 const redis  = require('./redis');
-const { extractPostId, normalizeLinkedInPostUrl } = require('./csv');
+const {
+  extractPostId,
+  normalizeLinkedInPostUrl,
+  readCommentedPosts,
+  writeCommentedPost,
+} = require('./csv');
 
 // Redis lock configuration
 const LOCK_PREFIX = 'lock:post:';
@@ -32,6 +37,54 @@ const LOCK_TTL_MS = 90_000; // 90 seconds — covers the full comment lifecycle
 
 // Lazily-initialized promise so table bootstrap runs once per process.
 let ensureCommentedPostsTablePromise = null;
+let databaseAvailable = true;
+let redisFallbackWarned = false;
+const inMemoryLocks = new Set();
+
+function disableDatabase(err) {
+  if (databaseAvailable) {
+    console.warn(`[postLock] PostgreSQL unavailable. Falling back to CSV mode. Reason: ${err?.message || 'unknown error'}`);
+  }
+  databaseAvailable = false;
+  ensureCommentedPostsTablePromise = null;
+}
+
+async function persistToCsvFallback({ postId, postUrl, authorName, commentText }) {
+  const normalizedUrl = postUrl ? normalizeLinkedInPostUrl(postUrl) : null;
+  const canonicalPostId = extractPostId(postId || normalizedUrl || '');
+  const csvPostUrl = normalizedUrl || canonicalPostId;
+  await writeCommentedPost(csvPostUrl, authorName || '', commentText || '');
+}
+
+async function upsertCommentRecord({ postId, postUrl, authorName, commentText }) {
+  const normalizedUrl = postUrl ? normalizeLinkedInPostUrl(postUrl) : null;
+  const canonicalPostId = extractPostId(postId || normalizedUrl || '');
+
+  if (databaseAvailable) {
+    await ensureCommentedPostsTable();
+  }
+
+  if (!databaseAvailable) {
+    await persistToCsvFallback({ postId: canonicalPostId, postUrl: normalizedUrl, authorName, commentText });
+    return;
+  }
+
+  try {
+    await prisma.commentedPost.upsert({
+      where:  { postId: canonicalPostId },
+      update: {},
+      create: {
+        postId:      canonicalPostId,
+        postUrl:     normalizedUrl || null,
+        authorName:  authorName  || null,
+        commentText: commentText || null,
+      },
+    });
+  } catch (err) {
+    disableDatabase(err);
+    await persistToCsvFallback({ postId: canonicalPostId, postUrl: normalizedUrl, authorName, commentText });
+  }
+}
 
 /**
  * Creates the commented_posts table/indexes if they do not exist.
@@ -39,6 +92,8 @@ let ensureCommentedPostsTablePromise = null;
  * was not pushed yet.
  */
 async function ensureCommentedPostsTable() {
+  if (!databaseAvailable) return;
+
   if (!ensureCommentedPostsTablePromise) {
     ensureCommentedPostsTablePromise = (async () => {
       await prisma.$executeRawUnsafe(`
@@ -66,13 +121,14 @@ async function ensureCommentedPostsTable() {
         CREATE INDEX IF NOT EXISTS "commented_posts_commentedAt_idx"
         ON "commented_posts" ("commentedAt")
       `);
-    })().catch((err) => {
-      ensureCommentedPostsTablePromise = null;
-      throw err;
     });
   }
 
-  await ensureCommentedPostsTablePromise;
+  try {
+    await ensureCommentedPostsTablePromise;
+  } catch (err) {
+    disableDatabase(err);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -86,12 +142,20 @@ const lockKey = (postId) => `${LOCK_PREFIX}${postId}`;
  * Returns true if this postId has already been recorded.
  */
 async function isAlreadyCommented(postId) {
+  if (!databaseAvailable) return false;
   await ensureCommentedPostsTable();
-  const row = await prisma.commentedPost.findUnique({
-    where:  { postId },
-    select: { id: true }, // minimal projection — we only need existence
-  });
-  return !!row;
+  if (!databaseAvailable) return false;
+
+  try {
+    const row = await prisma.commentedPost.findUnique({
+      where:  { postId },
+      select: { id: true }, // minimal projection — we only need existence
+    });
+    return !!row;
+  } catch (err) {
+    disableDatabase(err);
+    return false;
+  }
 }
 
 /**
@@ -99,8 +163,18 @@ async function isAlreadyCommented(postId) {
  * NX = only set if Not eXists → true if we got the lock, false if taken.
  */
 async function acquireLock(postId) {
-  const result = await redis.set(lockKey(postId), '1', 'PX', LOCK_TTL_MS, 'NX');
-  return result === 'OK';
+  try {
+    const result = await redis.set(lockKey(postId), '1', 'PX', LOCK_TTL_MS, 'NX');
+    return result === 'OK';
+  } catch (err) {
+    if (!redisFallbackWarned) {
+      redisFallbackWarned = true;
+      console.warn(`[postLock] Redis unavailable. Falling back to in-memory lock mode. Reason: ${err?.message || 'unknown error'}`);
+    }
+    if (inMemoryLocks.has(postId)) return false;
+    inMemoryLocks.add(postId);
+    return true;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -150,19 +224,7 @@ async function acquirePostLock(postId) {
  * gracefully — no exception, no retry needed.
  */
 async function saveComment({ postId, postUrl, authorName, commentText }) {
-  await ensureCommentedPostsTable();
-  const normalizedUrl = postUrl ? normalizeLinkedInPostUrl(postUrl) : null;
-  const canonicalPostId = extractPostId(postId || normalizedUrl || '');
-  await prisma.commentedPost.upsert({
-    where:  { postId: canonicalPostId },
-    update: {},   // already exists → treat as success, touch nothing
-    create: {
-      postId:      canonicalPostId,
-      postUrl:     normalizedUrl || null,
-      authorName:  authorName  || null,
-      commentText: commentText || null,
-    },
-  });
+  await upsertCommentRecord({ postId, postUrl, authorName, commentText });
 }
 
 /**
@@ -175,19 +237,7 @@ async function saveComment({ postId, postUrl, authorName, commentText }) {
  * post forever to eliminate duplicate-comment risk.
  */
 async function markPostAttempted({ postId, postUrl, authorName, commentText }) {
-  await ensureCommentedPostsTable();
-  const normalizedUrl = postUrl ? normalizeLinkedInPostUrl(postUrl) : null;
-  const canonicalPostId = extractPostId(postId || normalizedUrl || '');
-  await prisma.commentedPost.upsert({
-    where:  { postId: canonicalPostId },
-    update: {},
-    create: {
-      postId:      canonicalPostId,
-      postUrl:     normalizedUrl || null,
-      authorName:  authorName  || null,
-      commentText: commentText || null,
-    },
-  });
+  await upsertCommentRecord({ postId, postUrl, authorName, commentText });
 }
 
 /**
@@ -198,7 +248,12 @@ async function markPostAttempted({ postId, postUrl, authorName, commentText }) {
  * Calling it when the key doesn't exist is a safe no-op.
  */
 async function releaseLock(postId) {
-  await redis.del(lockKey(postId));
+  inMemoryLocks.delete(postId);
+  try {
+    await redis.del(lockKey(postId));
+  } catch {
+    // Ignore redis errors in fallback mode.
+  }
 }
 
 /**
@@ -211,10 +266,23 @@ async function releaseLock(postId) {
  * Returns: { ids: Set<string>, urls: Set<string> }
  */
 async function loadCommentedCache() {
-  await ensureCommentedPostsTable();
-  const rows = await prisma.commentedPost.findMany({
-    select: { postId: true, postUrl: true },
-  });
+  if (databaseAvailable) {
+    await ensureCommentedPostsTable();
+  }
+
+  if (!databaseAvailable) {
+    return readCommentedPosts();
+  }
+
+  let rows;
+  try {
+    rows = await prisma.commentedPost.findMany({
+      select: { postId: true, postUrl: true },
+    });
+  } catch (err) {
+    disableDatabase(err);
+    return readCommentedPosts();
+  }
 
   const ids  = new Set();
   const urls = new Set();
@@ -241,13 +309,27 @@ async function loadCommentedCache() {
  * in the last `days` days.  Used for the per-author cooldown check.
  */
 async function loadRecentAuthorsFromDb(days = 7) {
+  if (!databaseAvailable) {
+    return new Set();
+  }
+
   await ensureCommentedPostsTable();
+  if (!databaseAvailable) {
+    return new Set();
+  }
+
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
-  const rows = await prisma.commentedPost.findMany({
-    where:  { commentedAt: { gte: since } },
-    select: { authorName: true },
-  });
+  let rows;
+  try {
+    rows = await prisma.commentedPost.findMany({
+      where:  { commentedAt: { gte: since } },
+      select: { authorName: true },
+    });
+  } catch (err) {
+    disableDatabase(err);
+    return new Set();
+  }
 
   const authors = new Set();
   for (const row of rows) {
