@@ -7,3 +7,6 @@ data/commented_posts.csv
 data/*
 
 *.zip
+
+.openai_session
+openai_chat_url.txt
