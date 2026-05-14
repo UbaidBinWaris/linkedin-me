@@ -27,7 +27,7 @@ const { createSession }         = require('./src/browser/session');
 const { getFeedPostsBatch, parseEngagement, normalizePostText } = require('./src/linkedin/feed');
 const { shouldSkip, compositeScore } = require('./src/linkedin/filters');
 const { postComment }            = require('./src/linkedin/commenter');
-const { generateComment }        = require('./src/ai/gemini');
+const { generateCommentViaWeb } = require('./src/ai/chatgpt-tab-helper');
 const { pickRandomStyle, getStyleMemory } = require('./src/ai/commentStyles');
 const {
   extractPostId,
@@ -300,12 +300,9 @@ async function main() {
           success(`Style: "${style.label}"`);
           
           // Step 7: Generate
-          logStep(7, 'Generating comment with AI...');
+          logStep(7, 'Generating comment with AI (via ChatGPT Tab)...');
           await delay(2000, 4000);
-          const result = await generateComment(post.postText, post.authorName, style, {
-            existingComments: post.commentsData || [],
-            authorHeadline: post.authorHeadline || '',
-          });
+          const result = await generateCommentViaWeb(browser, post.postText, post.authorName, style);
           
           log(`   AI Target Angle: ${result.bestAngle}`);
           console.log(chalk.italic(`   "${result.comment}"\n`));
