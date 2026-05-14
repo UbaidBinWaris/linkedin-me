@@ -1,15 +1,26 @@
 import asyncio
 from playwright.async_api import async_playwright
 import os
+from prisma import Prisma
 
 # Path to the existing session directory
-# Using absolute path based on this file's location
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 SESSION_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "../session"))
 
 async def scrape_linkedin_profile(profile_url: str):
     print(f"Starting scrape for: {profile_url}")
     print(f"Using session directory: {SESSION_DIR}")
+    
+    # Test database connection
+    db = Prisma()
+    await db.connect()
+    try:
+        count = await db.contact.count()
+        print(f"Current contacts in DB: {count}")
+    except Exception as e:
+        print(f"Failed to query DB: {e}")
+    finally:
+        await db.disconnect()
     
     async with async_playwright() as p:
         try:
