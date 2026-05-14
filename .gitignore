@@ -10,3 +10,6 @@ data/*
 
 .openai_session
 openai_chat_url.txt
+
+
+*.pyc
