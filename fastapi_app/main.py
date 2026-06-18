@@ -1,5 +1,5 @@
 from fastapi import FastAPI, BackgroundTasks
-from .scraper import scrape_linkedin_profile
+from .scraper.linkedin.profile_scraper import scrape_profile
 
 app = FastAPI()
 
@@ -10,7 +10,7 @@ def read_root():
 @app.post("/scrape/profile")
 async def trigger_profile_scrape(url: str, background_tasks: BackgroundTasks):
     # Trigger the scraping task in the background
-    background_tasks.add_task(scrape_linkedin_profile, url)
+    background_tasks.add_task(scrape_profile, url)
     return {
         "status": "Scraping task started in background",
         "url": url,

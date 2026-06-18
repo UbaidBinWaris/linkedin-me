@@ -65,10 +65,11 @@ ${postText.slice(0, 1200)}
 """
 
 Rules:
-- 1-2 tight sentences. First sentence is your take, optional second is a follow-up.
+- Keep it extremely short (under 20 words).
+- One punchy, meaningful sentence only.
 - Reference a specific detail from the post.
-- No emojis, no hashtags.
-- Do NOT say "Great post!" or similar generic openers.
+- No emojis, no hashtags, no fluff.
+- Do NOT say "Great post!", "I agree", or similar generic openers.
 
 Respond with ONLY this JSON structure:
 {
@@ -122,18 +123,67 @@ Respond with ONLY this JSON structure:
     
     // Attempt to parse JSON
     try {
-      const cleaned = response.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
-      const parsed = JSON.parse(cleaned);
+      let cleaned = response.trim();
+      // Extract everything between the first { and last }
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        cleaned = jsonMatch[0];
+      } else {
+        // Remove code blocks if present
+        cleaned = cleaned.replace(/^```json?\s*/i, '').replace(/```\s*$/i, '').trim();
+      }
+
+      let parsed;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (innerError) {
+        console.log('[AI] JSON.parse failed, trying regex extraction...');
+        // Fallback: Try to extract via regex
+        const commentMatch = cleaned.match(/"comment":\s*"(.*?)(?<!\\)"/s);
+        const angleMatch = cleaned.match(/"best_angle":\s*"(.*?)(?<!\\)"/s);
+        
+        if (commentMatch) {
+          parsed = {
+            comment: commentMatch[1].replace(/\\"/g, '"'),
+            best_angle: angleMatch ? angleMatch[1].replace(/\\"/g, '"') : 'Extracted via regex'
+          };
+        } else {
+          throw innerError; // Rethrow if regex also fails
+        }
+      }
+
+      let comment = parsed.comment || response.trim();
+      
+      // Clean comment: remove em-dash, en-dash, double dashes, and extra spaces
+      comment = comment
+        .replace(/\s*[\u2014\u2013\u2500\u2015-]{2,}\s*/g, ' ') // ── or --
+        .replace(/\s*[\u2014\u2013\u2500\u2015]\s*/g, ' ')    // — or – or ─
+        .replace(/\s{2,}/g, ' ')                             // multiple spaces
+        .trim();
+
       return {
-        comment: parsed.comment || response.trim(),
+        comment: comment,
         interestScore: 70,
         whyInteresting: 'Generated via ChatGPT Web',
         bestAngle: parsed.best_angle || '',
       };
     } catch (e) {
-      console.log('[AI] Failed to parse JSON, returning raw text.');
+      console.log('[AI] Total failure to extract comment, using raw response.');
+      let comment = response.trim();
+      // Final attempt to clean if it's still JSON-like
+      comment = comment.replace(/^\{[\s\S]*\}$/, (match) => {
+          const m = match.match(/"comment":\s*"(.*?)(?<!\\)"/s);
+          return m ? m[1] : match;
+      });
+
+      comment = comment
+        .replace(/\s*[\u2014\u2013\u2500\u2015-]{2,}\s*/g, ' ')
+        .replace(/\s*[\u2014\u2013\u2500\u2015]\s*/g, ' ')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+
       return {
-        comment: response.trim(),
+        comment: comment,
         interestScore: 70,
         whyInteresting: 'Generated via ChatGPT Web (Raw)',
         bestAngle: 'Fallback',

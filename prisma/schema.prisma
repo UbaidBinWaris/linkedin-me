@@ -76,3 +76,59 @@ model Contact {
   @@index([createdAt])
   @@map("contacts")
 }
+
+model LinkedInProfile {
+  id            String   @id @default(uuid())
+  linkedinUrl   String   @unique
+  fullName      String?
+  headline      String?
+  about         String?
+  followers     Int?
+  connections   Int?
+  location      String?
+  scrapedAt     DateTime @default(now())
+  
+  posts         LinkedInPost[]
+  
+  @@map("linkedin_profiles")
+}
+
+model LinkedInPost {
+  id          String   @id @default(uuid())
+  profileId   String
+  profile     LinkedInProfile @relation(fields: [profileId], references: [id])
+  postText    String?
+  postType    String?
+  reactions   Int?
+  comments    Int?
+  reposts     Int?
+  postedAt    DateTime?
+  scrapedAt   DateTime @default(now())
+  
+  commentsList LinkedInComment[]
+  
+  @@map("linkedin_posts")
+}
+
+model LinkedInComment {
+  id            String   @id @default(uuid())
+  postId        String
+  post          LinkedInPost @relation(fields: [postId], references: [id])
+  commenterName String?
+  commenterUrl  String?
+  commentText   String?
+  likes         Int?
+  createdAt     DateTime?
+  
+  @@map("linkedin_comments")
+}
+
+model RawSnapshot {
+  id          String   @id @default(uuid())
+  sourceType  String
+  sourceUrl   String
+  htmlContent String
+  createdAt   DateTime @default(now())
+  
+  @@map("raw_snapshots")
+}

@@ -35,6 +35,7 @@ async function launchBrowser() {
   }
 
   const context = await chromium.launchPersistentContext(sessionDir, {
+    executablePath: '/usr/bin/google-chrome-stable', // Use system Chrome on Arch
     headless: config.browser.headless,
     viewport: { width: 1366, height: 900 },
     userAgent:
@@ -42,7 +43,15 @@ async function launchBrowser() {
       '(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     locale: 'en-US',
     timezoneId: 'America/New_York',
-    args: ['--disable-blink-features=AutomationControlled', '--no-sandbox'],
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-gpu',
+      '--disable-dev-shm-usage',
+      '--disable-software-rasterizer',
+      '--disable-features=Vulkan',
+    ],
   });
 
   await context.addInitScript(() => {

@@ -13,7 +13,7 @@ const COMMENT_STYLES = [
     instruction: `Reference a real, specific experience from your work as a developer, builder, or automation engineer.
 Use concrete detail (a tool, a situation, a result) — not generic advice.
 Example pattern: "When I built [X], I ran into exactly this — what helped was [Y]."
-Keep it to 1-2 sentences. First person, genuine, no filler.`,
+One short sentence only (max 18 words). No filler.`,
   },
   {
     id:          'contrarian',
@@ -21,14 +21,14 @@ Keep it to 1-2 sentences. First person, genuine, no filler.`,
     instruction: `Disagree with or add nuance to the post — respectfully and with a reason.
 State what you agree with first, then pivot to the thing that's often missed or oversimplified.
 Example pattern: "This is true for [X] — though in my experience, [counterpoint]."
-Must be respectful. Never dismissive. 1-2 sentences.`,
+Must be respectful. One short sentence only (max 18 words).`,
   },
   {
     id:          'analytical',
     label:       'Add Analytical Depth',
     instruction: `Expand on a trade-off, second-order effect, or nuance the author didn't explore.
 Think like an engineer reviewing a technical decision: what are the edge cases? What scales? What fails?
-1-2 sentences. Add signal, not just agreement.`,
+One short sentence only (max 18 words). Add signal, not just agreement.`,
   },
   {
     id:          'question',
@@ -36,7 +36,7 @@ Think like an engineer reviewing a technical decision: what are the edge cases? 
     instruction: `ONLY ask a question if the post contains incomplete/mismatched info, or introduces new tech needing explanation.
 If it does, ask ONE specific, curious question that shows you read and thought about it.
 If not, just provide a simple, insightful reaction.
-1-2 sentences. Genuine curiosity, not rhetorical.`,
+One short sentence only (max 18 words).`,
   },
   {
     id:          'parallel',
@@ -44,15 +44,15 @@ If not, just provide a simple, insightful reaction.
     instruction: `Connect the author's point to a pattern you've seen in software engineering, systems design, or automation.
 Use concrete domain language. Show you see the bigger principle behind the post.
 Example: "This mirrors [known concept/pattern] — [why it's similar and why it matters]."
-1-2 sentences.`,
+One short sentence only (max 18 words).`,
   },
   {
     id:          'builder',
     label:       'Builder Perspective',
     instruction: `React as someone who has shipped a real product or automation. Be specific about what worked or didn't.
 Show you've been in the trenches — reference a real outcome, number, or scenario.
-Example: "Shipped something similar last [year/quarter] — the real challenge was [X], not [Y the author implied]."
-1-2 sentences. Confident, grounded.`,
+Example: "Shipped something similar last [year/quarter] — the real challenge was [X], not [Y]."
+One short sentence only (max 18 words).`,
   },
 ];
 
