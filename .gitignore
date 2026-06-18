@@ -13,3 +13,6 @@ openai_chat_url.txt
 
 
 *.pyc
+
+
+/session_old_1778949100
