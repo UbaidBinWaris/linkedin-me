@@ -7,10 +7,6 @@ generator client {
   previewFeatures = ["postgresqlExtensions"]
 }
 
-generator py {
-  provider = "prisma-client-py"
-}
-
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
@@ -32,14 +28,21 @@ enum ContactTag {
   FOUNDER
 }
 
+enum DraftStatus {
+  DRAFT
+  APPROVED
+  SCHEDULED
+  PUBLISHED
+  REJECTED
+}
+
+enum DraftType {
+  POST
+  COMMENT
+}
+
 // ─────────────────────────────────────────────────────────────────
 //  CommentedPost — permanent record of every comment attempt
-//
-//  postId is the canonical dedup key (19-digit LinkedIn snowflake ID
-//  or the full URL when no ID can be extracted).
-//  The UNIQUE constraint at database level is the final safety net —
-//  even if application logic races, PostgreSQL will reject a second
-//  insert for the same postId with a unique-constraint error.
 // ─────────────────────────────────────────────────────────────────
 model CommentedPost {
   id          Int      @id @default(autoincrement())
@@ -94,33 +97,120 @@ model LinkedInProfile {
 }
 
 model LinkedInPost {
-  id          String   @id @default(uuid())
-  profileId   String
-  profile     LinkedInProfile @relation(fields: [profileId], references: [id])
-  postText    String?
-  postType    String?
-  reactions   Int?
-  comments    Int?
-  reposts     Int?
-  postedAt    DateTime?
-  scrapedAt   DateTime @default(now())
+  id              String            @id @default(uuid())
+  postId          String?           @unique
+  postUrl         String?
+  profileId       String?
+  profile         LinkedInProfile?  @relation(fields: [profileId], references: [id])
+  authorName      String?
+  authorHeadline  String?
+  authorFollowers Int?
+  postText        String?
+  postType        String?
+  reactions       Int?              @default(0)
+  comments        Int?              @default(0)
+  reposts         Int?              @default(0)
+  hashtags        String[]          @default([])
+  mentions        String[]          @default([])
+  language        String?           @default("en")
+  industry        String?
+  topic           String?
+  sentimentScore  Float?
+  viralScore      Float?
+  postedAt        DateTime?
+  scrapedAt       DateTime          @default(now())
   
-  commentsList LinkedInComment[]
+  commentsList    LinkedInComment[]
   
+  @@index([postId])
+  @@index([topic])
+  @@index([viralScore])
   @@map("linkedin_posts")
 }
 
 model LinkedInComment {
-  id            String   @id @default(uuid())
+  id            String       @id @default(uuid())
   postId        String
   post          LinkedInPost @relation(fields: [postId], references: [id])
   commenterName String?
   commenterUrl  String?
   commentText   String?
-  likes         Int?
-  createdAt     DateTime?
+  likes         Int?         @default(0)
+  sentiment     String?
+  emotion       String?
+  intent        String?
+  qualityScore  Float?
+  hasQuestion   Boolean      @default(false)
+  hasCTA        Boolean      @default(false)
+  isSpam        Boolean      @default(false)
+  createdAt     DateTime?    @default(now())
   
+  @@index([postId])
+  @@index([qualityScore])
   @@map("linkedin_comments")
+}
+
+// ─────────────────────────────────────────────────────────────────
+//  PostDraft — Human-in-the-Loop review portal queue
+//  Strict safety: AI agents produce DRAFT state records. Publishing
+//  triggers ONLY when approved explicitly by the user.
+// ─────────────────────────────────────────────────────────────────
+model PostDraft {
+  id             String      @id @default(uuid())
+  type           DraftType   @default(COMMENT)
+  targetPostId   String?
+  targetPostUrl  String?
+  authorName     String?
+  content        String
+  style          String?
+  predictedScore Float?
+  status         DraftStatus @default(DRAFT)
+  scheduledFor   DateTime?
+  publishedAt    DateTime?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([status])
+  @@index([scheduledFor])
+  @@map("post_drafts")
+}
+
+model CompetitorTrack {
+  id           String   @id @default(uuid())
+  name         String
+  linkedinUrl  String   @unique
+  headline     String?
+  avgReactions Float?   @default(0)
+  avgComments  Float?   @default(0)
+  topTopics    String[] @default([])
+  lastAnalyzed DateTime @default(now())
+
+  @@map("competitor_tracks")
+}
+
+model ViralPattern {
+  id             String   @id @default(uuid())
+  topic          String
+  contentType    String
+  bestPostingHour Int?
+  bestDayOfWeek  Int?
+  avgEngagement  Float
+  sampleSize     Int      @default(1)
+  updatedAt      DateTime @updatedAt
+
+  @@map("viral_patterns")
+}
+
+model AgentMemory {
+  id         String   @id @default(uuid())
+  category   String   // e.g. "writing_style", "successful_hook", "failed_angle"
+  key        String
+  value      String
+  confidence Float    @default(1.0)
+  createdAt  DateTime @default(now())
+
+  @@index([category])
+  @@map("agent_memories")
 }
 
 model RawSnapshot {
@@ -132,3 +222,4 @@ model RawSnapshot {
   
   @@map("raw_snapshots")
 }
+
